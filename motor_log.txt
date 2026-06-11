@@ -1,0 +1,543 @@
+
+
+===== Session started 2026-06-10 23:17:29.381 =====
+===== Session ended 2026-06-10 23:17:29.383 =====
+
+
+===== Session started 2026-06-10 23:17:33.370 =====
+===== Session ended 2026-06-10 23:17:33.370 =====
+
+
+===== Session started 2026-06-10 23:17:34.823 =====
+===== Session ended 2026-06-10 23:17:34.823 =====
+
+
+===== Session started 2026-06-10 23:17:36.030 =====
+===== Session ended 2026-06-10 23:17:36.030 =====
+
+
+===== Session started 2026-06-10 23:17:37.516 =====
+===== Session ended 2026-06-10 23:17:37.518 =====
+
+
+===== Session started 2026-06-10 23:25:53.080 =====
+===== Session ended 2026-06-10 23:26:22.640 =====
+
+
+===== Session started 2026-06-10 23:26:25.550 =====
+===== Session ended 2026-06-10 23:26:29.827 =====
+
+
+===== Session started 2026-06-10 23:26:33.775 =====
+===== Session ended 2026-06-10 23:26:36.898 =====
+
+
+===== Session started 2026-06-10 23:26:43.314 =====
+===== Session ended 2026-06-10 23:27:17.046 =====
+
+
+===== Session started 2026-06-10 23:29:03.572 =====
+===== Session ended 2026-06-10 23:29:15.662 =====
+
+
+===== Session started 2026-06-10 23:29:20.363 =====
+===== Session ended 2026-06-10 23:29:30.592 =====
+
+
+===== Session started 2026-06-10 23:31:20.723 =====
+===== Session ended 2026-06-10 23:31:27.392 =====
+
+
+===== Session started 2026-06-10 23:32:56.473 =====
+===== Session ended 2026-06-10 23:34:38.760 =====
+
+
+===== Session started 2026-06-10 23:35:54.952 =====
+===== Session ended 2026-06-10 23:36:04.340 =====
+
+
+===== Session started 2026-06-10 23:40:36.356 =====
+===== Session ended 2026-06-10 23:40:41.050 =====
+
+
+===== Session started 2026-06-10 23:41:48.517 =====
+===== Connected to COM6 at 2026-06-10 23:41:48.734 =====
+[2026-06-10 23:41:55.984] > MOVE 0 100 10
+===== Connected to COM7 at 2026-06-10 23:46:10.835 =====
+===== Connected to COM8 at 2026-06-10 23:46:23.378 =====
+===== Session ended 2026-06-10 23:46:30.210 =====
+
+
+===== Session started 2026-06-10 23:46:33.425 =====
+===== Connected to COM8 at 2026-06-10 23:46:33.655 =====
+[2026-06-10 23:46:48.698] > MOVE 0 100 1
+===== Session ended 2026-06-10 23:47:38.730 =====
+
+
+===== Session started 2026-06-10 23:50:39.083 =====
+===== Connected to COM7 at 2026-06-10 23:50:42.399 =====
+[2026-06-10 23:50:49.668] Connection Valid.
+[2026-06-10 23:50:57.664] Connection Valid.
+[2026-06-10 23:50:58.604] > MOVE 0 100 10
+[2026-06-10 23:50:58.676] Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+Received USB buffer.
+===== Connected to COM7 at 2026-06-10 23:52:54.525 =====
+[2026-06-10 23:53:01.770] Connection Valid.
+[2026-06-10 23:53:06.982] > MOVE 0 100 10
+[2026-06-10 23:53:07.052] Parsing Command: MOVE 0 100 10
+===== Session ended 2026-06-10 23:54:04.546 =====
+
+
+===== Session started 2026-06-10 23:54:24.667 =====
+===== Session ended 2026-06-10 23:55:54.720 =====
+
+
+===== Session started 2026-06-10 23:57:57.753 =====
+===== Connected to COM7 at 2026-06-10 23:57:57.988 =====
+[2026-06-10 23:58:02.463] > MOVE 100 10
+[2026-06-10 23:58:02.584] Parsing Command: MOVE 100 10
+Invalid Command Received.
+[2026-06-10 23:58:12.533] > MOVE 0 100 10
+[2026-06-10 23:58:12.618] Parsing Command: MOVE 0 100 10
+Scanf successful!
+===== Session ended 2026-06-10 23:58:50.893 =====
+
+
+===== Session started 2026-06-11 00:01:20.400 =====
+===== Connected to COM7 at 2026-06-11 00:01:23.181 =====
+[2026-06-11 00:01:29.752] > MOVE 0 100 10
+[2026-06-11 00:01:29.859] Parsing Command: MOVE 0 100 10
+Scanf successful!
+Queue handle: 0x20001bc0
+Queue count=0 space=16
+Before osMessageQueuePut
+After osMessageQueuePut status=0
+OK QUEUED MOVE 0 100 10
+===== Connected to COM7 at 2026-06-11 00:07:05.387 =====
+[2026-06-11 00:07:10.378] > MOVE 0 100 10
+[2026-06-11 00:07:10.493] Parsing Command: MOVE 0 100 10
+[2026-06-11 00:07:29.376] > MOVE 0 100 10
+===== Connected to COM8 at 2026-06-11 00:10:17.512 =====
+[2026-06-11 00:10:20.066] > MOVE 0 100 10
+[2026-06-11 00:10:20.168] Parsing Command: MOVE 0 100 10
+[2026-06-11 00:10:22.549] > MOVE 0 100 10
+===== Connected to COM7 at 2026-06-11 00:12:18.559 =====
+[2026-06-11 00:12:22.033] Connection Valid.
+[2026-06-11 00:12:23.498] > MOVE 0 100 10
+[2026-06-11 00:12:23.606] Parsing Command: MOVE 0 100 10
+===== Session ended 2026-06-11 00:17:21.435 =====
+
+
+===== Session started 2026-06-11 00:17:24.300 =====
+===== Connected to COM7 at 2026-06-11 00:18:26.273 =====
+[2026-06-11 00:18:33.396] Connection Valid.
+[2026-06-11 00:18:33.732] > MOVE 0 100 10
+[2026-06-11 00:18:33.835] Parsing Command: MOVE 0 100 10
+===== Connected to COM7 at 2026-06-11 00:20:10.509 =====
+[2026-06-11 00:20:11.728] > MOVE 0 100 10
+[2026-06-11 00:20:11.831] Parsing Command: MOVE 0 100 10
+===== Connected to COM7 at 2026-06-11 00:33:42.865 =====
+[2026-06-11 00:33:44.580] > MOVE 0 100 10
+[2026-06-11 00:33:44.704] Parsing Command: MOVE 0 100 10
+OK QUEUED MOVE 0 100 10
+Received Command!
+Notify result=1
+Received Task Notification: (403)
+New State: target: 100, speed: 50, enabled: 1.
+[2026-06-11 00:33:50.130] Connection Valid.
+[2026-06-11 00:33:58.089] Connection Valid.
+[2026-06-11 00:34:06.023] Connection Valid.
+[2026-06-11 00:34:13.980] Connection Valid.
+[2026-06-11 00:34:21.942] Connection Valid.
+[2026-06-11 00:34:29.902] Connection Valid.
+[2026-06-11 00:34:37.837] Connection Valid.
+[2026-06-11 00:34:45.851] Connection Valid.
+[2026-06-11 00:34:53.805] Connection Valid.
+[2026-06-11 00:35:01.765] Connection Valid.
+[2026-06-11 00:35:09.709] Connection Valid.
+[2026-06-11 00:35:17.655] Connection Valid.
+===== Connected to COM7 at 2026-06-11 00:36:03.604 =====
+[2026-06-11 00:36:05.342] > MOVE 0 100 10
+[2026-06-11 00:36:05.436] Parsing Command: MOVE 0 100 10
+OK QUEUED MOVE 0 100 10
+Received Command!
+Notify result=1
+Received Task Notification: (403)
+New State: target: 100, speed: 50, enabled: 1.
+[2026-06-11 00:36:06.003] Connection Valid.
+[2026-06-11 00:36:13.952] Connection Valid.
+[2026-06-11 00:36:21.890] Connection Valid.
+[2026-06-11 00:36:29.899] Connection Valid.
+[2026-06-11 00:36:37.836] Connection Valid.
+[2026-06-11 00:36:45.777] Connection Valid.
+[2026-06-11 00:36:53.791] Connection Valid.
+[2026-06-11 00:37:01.740] Connection Valid.
+[2026-06-11 00:37:09.685] Connection Valid.
+[2026-06-11 00:37:17.640] Connection Valid.
+[2026-06-11 00:37:25.587] Connection Valid.
+[2026-06-11 00:37:33.549] Connection Valid.
+[2026-06-11 00:37:41.555] Connection Valid.
+[2026-06-11 00:37:49.495] Connection Valid.
+[2026-06-11 00:37:57.446] Connection Valid.
+[2026-06-11 00:38:05.425] Connection Valid.
+[2026-06-11 00:38:13.372] Connection Valid.
+[2026-06-11 00:38:21.375] Connection Valid.
+===== Connected to COM7 at 2026-06-11 00:38:41.412 =====
+[2026-06-11 00:38:42.404] > MOVE 0 100 10
+[2026-06-11 00:38:42.485] Parsing Command: MOVE 0 100 10
+OK QUEUED MOVE 0 100 10
+Received Command!
+Notify result=1
+Received Task Notification: (403)
+New State: target: 100, speed: 50, enabled: 1.
+[2026-06-11 00:38:48.542] Connection Valid.
+[2026-06-11 00:38:56.505] Connection Valid.
+[2026-06-11 00:38:58.701] > MOVE 0 200 10
+===== Session ended 2026-06-11 00:39:02.820 =====
+
+
+===== Session started 2026-06-11 00:39:09.023 =====
+===== Connected to COM7 at 2026-06-11 00:39:12.831 =====
+[2026-06-11 00:39:17.971] > MOVE 0 100 10
+[2026-06-11 00:39:18.076] Parsing Command: MOVE 0 100 10
+OK QUEUED MOVE 0 100 10
+Received Command!
+Notify result=1
+Received Task Notification: (403)
+New State: target: 100, speed: 50, enabled: 1.
+[2026-06-11 00:39:19.906] Connection Valid.
+[2026-06-11 00:39:22.996] > MOVE 0 200 10
+[2026-06-11 00:39:27.870] Connection Valid.
+[2026-06-11 00:39:35.857] Connection Valid.
+===== Session ended 2026-06-11 00:39:36.306 =====
+
+
+===== Session started 2026-06-11 00:47:59.722 =====
+===== Connected to COM7 at 2026-06-11 00:47:59.939 =====
+[2026-06-11 00:48:00.880] USB rx_cb=0 rx_bytes=0 rx_drop=0 lines=0
+[2026-06-11 00:48:03.849] USB rx_cb=0 rx_bytes=0 rx_drop=0 lines=0
+[2026-06-11 00:48:06.548] > MOVE 0 100 10
+[2026-06-11 00:48:06.622] Parsing Command: MOVE 0 100 10
+OK QUEUED MOVE 0 100 10
+Received Command!
+Notify result=1
+Received Task Notification: (403)
+New State: target: 100, speed: 50, enabled: 1.
+[2026-06-11 00:48:06.813] USB rx_cb=1 rx_bytes=14 rx_drop=0 lines=0
+[2026-06-11 00:48:09.836] USB rx_cb=1 rx_bytes=14 rx_drop=0 lines=0
+[2026-06-11 00:48:12.790] USB rx_cb=1 rx_bytes=14 rx_drop=0 lines=0
+[2026-06-11 00:48:15.751] USB rx_cb=1 rx_bytes=14 rx_drop=0 lines=0
+[2026-06-11 00:48:17.720] > MOVE 0 100 10
+[2026-06-11 00:48:18.782] USB rx_cb=2 rx_bytes=28 rx_drop=0 lines=0
+[2026-06-11 00:48:21.744] USB rx_cb=2 rx_bytes=28 rx_drop=0 lines=0
+[2026-06-11 00:48:23.733] > MOVE 0 100 10
+[2026-06-11 00:48:24.764] USB rx_cb=3 rx_bytes=42 rx_drop=0 lines=0
+[2026-06-11 00:48:27.725] USB rx_cb=3 rx_bytes=42 rx_drop=0 lines=0
+[2026-06-11 00:48:28.613] > MOVE 0 100 10
+[2026-06-11 00:48:30.686] USB rx_cb=4 rx_bytes=56 rx_drop=0 lines=0
+===== Session ended 2026-06-11 00:48:32.839 =====
+
+
+===== Session started 2026-06-11 15:23:56.256 =====
+===== Connected to COM7 at 2026-06-11 15:24:20.602 =====
+[2026-06-11 15:24:20.788] Pin Output: 1
+[2026-06-11 15:24:21.800] Pin Output: 1
+[2026-06-11 15:24:22.794] Pin Output: 1
+[2026-06-11 15:24:23.788] Pin Output: 1
+[2026-06-11 15:24:24.781] Pin Output: 1
+[2026-06-11 15:24:25.775] Pin Output: 1
+[2026-06-11 15:24:26.765] Pin Output: 1
+[2026-06-11 15:24:27.757] Pin Output: 1
+[2026-06-11 15:24:28.752] Pin Output: 1
+[2026-06-11 15:24:29.744] Pin Output: 1
+[2026-06-11 15:24:30.742] Pin Output: 1
+[2026-06-11 15:24:31.741] Pin Output: 1
+[2026-06-11 15:24:32.733] Pin Output: 1
+[2026-06-11 15:24:33.789] Pin Output: 1
+[2026-06-11 15:24:34.781] Pin Output: 1
+[2026-06-11 15:24:35.778] Pin Output: 1
+[2026-06-11 15:24:36.773] Pin Output: 1
+[2026-06-11 15:24:37.766] Pin Output: 1
+[2026-06-11 15:24:38.763] Pin Output: 1
+[2026-06-11 15:24:39.757] Pin Output: 1
+[2026-06-11 15:24:40.751] Pin Output: 1
+[2026-06-11 15:24:41.749] Pin Output: 1
+[2026-06-11 15:24:42.743] Pin Output: 1
+[2026-06-11 15:24:43.738] Pin Output: 1
+[2026-06-11 15:24:44.736] Pin Output: 1
+[2026-06-11 15:24:45.732] Pin Output: 1
+[2026-06-11 15:24:46.725] Pin Output: 1
+[2026-06-11 15:24:47.721] Pin Output: 1
+[2026-06-11 15:24:48.715] Pin Output: 1
+[2026-06-11 15:24:49.710] Pin Output: 1
+[2026-06-11 15:24:50.705] Pin Output: 1
+[2026-06-11 15:24:51.699] Pin Output: 1
+[2026-06-11 15:24:52.696] Pin Output: 1
+[2026-06-11 15:24:53.691] Pin Output: 1
+[2026-06-11 15:24:54.687] Pin Output: 1
+[2026-06-11 15:24:55.744] Pin Output: 1
+[2026-06-11 15:24:56.741] Pin Output: 1
+[2026-06-11 15:24:57.735] Pin Output: 1
+[2026-06-11 15:24:58.730] Pin Output: 1
+[2026-06-11 15:24:59.723] Pin Output: 1
+[2026-06-11 15:25:00.723] Pin Output: 1
+[2026-06-11 15:25:01.721] Pin Output: 1
+[2026-06-11 15:25:02.716] Pin Output: 1
+[2026-06-11 15:25:03.712] Pin Output: 1
+[2026-06-11 15:25:04.709] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 15:25:06.051 =====
+[2026-06-11 15:25:06.551] Pin Output: 1
+[2026-06-11 15:25:07.561] Pin Output: 1
+[2026-06-11 15:25:08.558] Pin Output: 1
+[2026-06-11 15:25:09.556] Pin Output: 1
+[2026-06-11 15:25:10.551] Pin Output: 1
+[2026-06-11 15:25:11.549] Pin Output: 1
+[2026-06-11 15:25:12.545] Pin Output: 1
+[2026-06-11 15:25:13.541] Pin Output: 1
+[2026-06-11 15:25:14.534] Pin Output: 1
+[2026-06-11 15:25:15.530] Pin Output: 1
+[2026-06-11 15:25:16.525] Pin Output: 1
+[2026-06-11 15:25:17.519] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 15:25:42.703 =====
+[2026-06-11 15:25:43.203] Pin Output: 1
+[2026-06-11 15:25:44.210] Pin Output: 1
+[2026-06-11 15:25:45.207] Pin Output: 1
+[2026-06-11 15:25:46.199] Pin Output: 1
+[2026-06-11 15:25:47.193] Pin Output: 1
+[2026-06-11 15:25:48.189] Pin Output: 1
+[2026-06-11 15:25:49.183] Pin Output: 1
+[2026-06-11 15:25:50.179] Pin Output: 1
+[2026-06-11 15:25:51.178] Pin Output: 1
+[2026-06-11 15:25:52.172] Pin Output: 1
+[2026-06-11 15:25:53.167] Pin Output: 1
+[2026-06-11 15:25:54.157] Pin Output: 1
+===== Connected to COM8 at 2026-06-11 12:06:00.713 =====
+[2026-06-11 12:06:01.280] Pin Output: 1
+[2026-06-11 12:06:02.220] Pin Output: 1
+[2026-06-11 12:06:03.215] Pin Output: 1
+[2026-06-11 12:06:04.213] Pin Output: 1
+[2026-06-11 12:06:05.211] Pin Output: 1
+[2026-06-11 12:06:06.206] Pin Output: 1
+[2026-06-11 12:06:07.203] Pin Output: 1
+[2026-06-11 12:06:08.197] Pin Output: 1
+[2026-06-11 12:06:09.200] Pin Output: 1
+[2026-06-11 12:06:10.199] Pin Output: 1
+[2026-06-11 12:06:11.198] Pin Output: 1
+[2026-06-11 12:06:12.193] Pin Output: 1
+[2026-06-11 12:06:13.192] Pin Output: 1
+[2026-06-11 12:06:14.184] Pin Output: 1
+[2026-06-11 12:06:15.179] Pin Output: 1
+[2026-06-11 12:06:16.174] Pin Output: 1
+[2026-06-11 12:06:17.172] Pin Output: 1
+[2026-06-11 12:06:18.169] Pin Output: 1
+[2026-06-11 12:06:19.165] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:06:51.345 =====
+[2026-06-11 12:06:51.718] Pin Output: 1
+[2026-06-11 12:06:52.726] Pin Output: 1
+[2026-06-11 12:06:53.719] Pin Output: 1
+[2026-06-11 12:06:54.714] Pin Output: 1
+[2026-06-11 12:06:55.709] Pin Output: 1
+[2026-06-11 12:06:56.706] Pin Output: 1
+[2026-06-11 12:06:57.701] Pin Output: 1
+[2026-06-11 12:06:58.694] Pin Output: 1
+[2026-06-11 12:06:59.688] Pin Output: 1
+[2026-06-11 12:07:00.682] Pin Output: 1
+[2026-06-11 12:07:01.685] Pin Output: 1
+[2026-06-11 12:07:02.679] Pin Output: 1
+[2026-06-11 12:07:03.674] Pin Output: 1
+[2026-06-11 12:07:04.610] Pin Output: 1
+[2026-06-11 12:07:05.607] Pin Output: 1
+[2026-06-11 12:07:06.600] Pin Output: 1
+[2026-06-11 12:07:07.596] Pin Output: 1
+[2026-06-11 12:07:08.591] Pin Output: 1
+[2026-06-11 12:07:09.583] Pin Output: 1
+[2026-06-11 12:07:10.582] Pin Output: 1
+[2026-06-11 12:07:11.578] Pin Output: 1
+[2026-06-11 12:07:12.574] Pin Output: 1
+[2026-06-11 12:07:13.571] Pin Output: 1
+[2026-06-11 12:07:14.566] Pin Output: 1
+[2026-06-11 12:07:15.560] Pin Output: 1
+[2026-06-11 12:07:16.554] Pin Output: 1
+[2026-06-11 12:07:17.549] Pin Output: 1
+[2026-06-11 12:07:18.545] Pin Output: 1
+[2026-06-11 12:07:19.539] Pin Output: 1
+[2026-06-11 12:07:20.530] Pin Output: 1
+[2026-06-11 12:07:21.527] Pin Output: 1
+[2026-06-11 12:07:22.526] Pin Output: 1
+[2026-06-11 12:07:23.520] Pin Output: 1
+[2026-06-11 12:07:24.514] Pin Output: 1
+[2026-06-11 12:07:25.512] Pin Output: 1
+[2026-06-11 12:07:26.502] Pin Output: 1
+[2026-06-11 12:07:27.494] Pin Output: 1
+[2026-06-11 12:07:28.487] Pin Output: 1
+[2026-06-11 12:07:29.478] Pin Output: 1
+[2026-06-11 12:07:30.475] Pin Output: 1
+[2026-06-11 12:07:31.474] Pin Output: 1
+[2026-06-11 12:07:32.475] Pin Output: 1
+[2026-06-11 12:07:33.466] Pin Output: 1
+[2026-06-11 12:07:34.460] Pin Output: 1
+[2026-06-11 12:07:35.453] Pin Output: 1
+[2026-06-11 12:07:36.444] Pin Output: 1
+[2026-06-11 12:07:37.441] Pin Output: 1
+[2026-06-11 12:07:38.438] Pin Output: 1
+[2026-06-11 12:07:39.434] Pin Output: 1
+[2026-06-11 12:07:40.427] Pin Output: 1
+[2026-06-11 12:07:41.424] Pin Output: 1
+[2026-06-11 12:07:42.418] Pin Output: 1
+[2026-06-11 12:07:43.413] Pin Output: 1
+[2026-06-11 12:07:44.408] Pin Output: 1
+[2026-06-11 12:07:45.403] Pin Output: 1
+[2026-06-11 12:07:46.401] Pin Output: 1
+[2026-06-11 12:07:47.398] Pin Output: 1
+[2026-06-11 12:07:48.392] Pin Output: 1
+[2026-06-11 12:07:49.390] Pin Output: 1
+[2026-06-11 12:07:50.387] Pin Output: 1
+[2026-06-11 12:07:51.323] Pin Output: 1
+[2026-06-11 12:07:52.320] Pin Output: 1
+[2026-06-11 12:07:53.315] Pin Output: 1
+[2026-06-11 12:07:54.314] Pin Output: 1
+[2026-06-11 12:07:55.308] Pin Output: 1
+[2026-06-11 12:07:56.305] Pin Output: 1
+[2026-06-11 12:07:57.299] Pin Output: 1
+[2026-06-11 12:07:58.295] Pin Output: 1
+[2026-06-11 12:07:59.288] Pin Output: 1
+[2026-06-11 12:08:00.282] Pin Output: 1
+[2026-06-11 12:08:01.275] Pin Output: 1
+[2026-06-11 12:08:02.271] Pin Output: 1
+[2026-06-11 12:08:03.270] Pin Output: 1
+[2026-06-11 12:08:04.267] Pin Output: 1
+[2026-06-11 12:08:05.263] Pin Output: 1
+[2026-06-11 12:08:06.258] Pin Output: 1
+[2026-06-11 12:08:07.253] Pin Output: 1
+[2026-06-11 12:08:08.248] Pin Output: 1
+[2026-06-11 12:08:09.247] Pin Output: 1
+[2026-06-11 12:08:10.244] Pin Output: 1
+[2026-06-11 12:08:11.239] Pin Output: 1
+[2026-06-11 12:08:12.236] Pin Output: 1
+[2026-06-11 12:08:13.233] Pin Output: 1
+[2026-06-11 12:08:14.230] Pin Output: 1
+[2026-06-11 12:08:15.226] Pin Output: 1
+[2026-06-11 12:08:16.221] Pin Output: 1
+[2026-06-11 12:08:17.218] Pin Output: 1
+[2026-06-11 12:08:18.209] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:08:22.883 =====
+[2026-06-11 12:08:23.569] Pin Output: 1
+[2026-06-11 12:08:24.567] Pin Output: 1
+[2026-06-11 12:08:25.561] Pin Output: 1
+[2026-06-11 12:08:26.560] Pin Output: 1
+[2026-06-11 12:08:27.556] Pin Output: 1
+[2026-06-11 12:08:28.548] Pin Output: 1
+[2026-06-11 12:08:29.542] Pin Output: 1
+[2026-06-11 12:08:30.538] Pin Output: 1
+[2026-06-11 12:08:31.540] Pin Output: 1
+[2026-06-11 12:08:32.533] Pin Output: 1
+[2026-06-11 12:08:33.527] Pin Output: 1
+[2026-06-11 12:08:34.523] Pin Output: 1
+[2026-06-11 12:08:35.522] Pin Output: 1
+[2026-06-11 12:08:36.519] Pin Output: 1
+[2026-06-11 12:08:37.518] Pin Output: 1
+[2026-06-11 12:08:38.507] Pin Output: 1
+[2026-06-11 12:08:39.504] Pin Output: 1
+[2026-06-11 12:08:40.495] Pin Output: 1
+[2026-06-11 12:08:41.490] Pin Output: 1
+[2026-06-11 12:08:42.486] Pin Output: 1
+[2026-06-11 12:08:43.480] Pin Output: 1
+[2026-06-11 12:08:44.474] Pin Output: 1
+[2026-06-11 12:08:45.469] Pin Output: 1
+[2026-06-11 12:08:46.467] Pin Output: 1
+[2026-06-11 12:08:47.466] Pin Output: 1
+[2026-06-11 12:08:48.462] Pin Output: 1
+[2026-06-11 12:08:49.455] Pin Output: 1
+[2026-06-11 12:08:50.447] Pin Output: 1
+[2026-06-11 12:08:51.445] Pin Output: 1
+[2026-06-11 12:08:52.440] Pin Output: 1
+[2026-06-11 12:08:53.435] Pin Output: 1
+[2026-06-11 12:08:54.431] Pin Output: 1
+[2026-06-11 12:08:55.428] Pin Output: 1
+[2026-06-11 12:08:56.423] Pin Output: 1
+[2026-06-11 12:08:57.420] Pin Output: 1
+[2026-06-11 12:08:58.419] Pin Output: 1
+[2026-06-11 12:08:59.416] Pin Output: 1
+[2026-06-11 12:09:00.350] Pin Output: 1
+[2026-06-11 12:09:01.348] Pin Output: 1
+[2026-06-11 12:09:02.346] Pin Output: 1
+[2026-06-11 12:09:03.341] Pin Output: 1
+[2026-06-11 12:09:04.336] Pin Output: 1
+===== Connected to COM8 at 2026-06-11 12:14:59.398 =====
+[2026-06-11 12:14:59.834] Pin Output: 1
+[2026-06-11 12:15:00.842] Pin Output: 1
+[2026-06-11 12:15:01.841] Pin Output: 1
+[2026-06-11 12:15:02.837] Pin Output: 1
+[2026-06-11 12:15:03.835] Pin Output: 1
+[2026-06-11 12:15:04.832] Pin Output: 1
+[2026-06-11 12:15:05.827] Pin Output: 1
+[2026-06-11 12:15:06.823] Pin Output: 1
+[2026-06-11 12:15:07.814] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:19:47.626 =====
+[2026-06-11 12:19:47.687] Pin Output: 1
+[2026-06-11 12:19:48.500] Pin Output: 1
+[2026-06-11 12:19:49.499] Pin Output: 1
+[2026-06-11 12:19:50.489] Pin Output: 1
+[2026-06-11 12:19:51.483] Pin Output: 1
+[2026-06-11 12:19:52.478] Pin Output: 1
+[2026-06-11 12:19:53.473] Pin Output: 1
+[2026-06-11 12:19:54.465] Pin Output: 1
+[2026-06-11 12:19:55.458] Pin Output: 1
+[2026-06-11 12:19:56.451] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:21:07.113 =====
+[2026-06-11 12:21:07.303] Pin Output: 1
+[2026-06-11 12:21:08.317] Pin Output: 1
+[2026-06-11 12:21:09.316] Pin Output: 1
+[2026-06-11 12:21:10.310] Pin Output: 1
+[2026-06-11 12:21:11.307] Pin Output: 1
+[2026-06-11 12:21:12.301] Pin Output: 1
+[2026-06-11 12:21:13.300] Pin Output: 1
+[2026-06-11 12:21:14.297] Pin Output: 1
+[2026-06-11 12:21:15.295] Pin Output: 1
+[2026-06-11 12:21:16.288] Pin Output: 1
+===== Session ended 2026-06-11 12:21:16.916 =====
+
+
+===== Session started 2026-06-11 12:26:20.009 =====
+===== Connected to COM7 at 2026-06-11 12:26:21.770 =====
+[2026-06-11 12:26:22.023] Pin Output: 1
+[2026-06-11 12:26:23.029] Pin Output: 1
+[2026-06-11 12:26:24.021] Pin Output: 1
+[2026-06-11 12:26:25.016] Pin Output: 1
+[2026-06-11 12:26:26.013] Pin Output: 1
+[2026-06-11 12:26:27.011] Pin Output: 1
+[2026-06-11 12:26:28.008] Pin Output: 1
+[2026-06-11 12:26:29.001] Pin Output: 1
+[2026-06-11 12:26:29.996] Pin Output: 1
+[2026-06-11 12:26:30.990] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:26:58.623 =====
+[2026-06-11 12:26:58.994] Pin Output: 1
+[2026-06-11 12:27:00.010] Pin Output: 1
+[2026-06-11 12:27:01.002] Pin Output: 1
+===== Connected to COM7 at 2026-06-11 12:27:36.403 =====
+[2026-06-11 12:27:36.465] Pin Output: 1
+[2026-06-11 12:27:37.475] Pin Output: 1
+[2026-06-11 12:27:38.468] Pin Output: 1
+[2026-06-11 12:27:39.463] Pin Output: 1
+[2026-06-11 12:27:40.458] Pin Output: 1
+===== Session ended 2026-06-11 12:27:41.208 =====
+
+
+===== Session started 2026-06-11 12:28:26.824 =====
+===== Session ended 2026-06-11 12:30:59.814 =====
+
+
+===== Session started 2026-06-11 12:31:02.305 =====
+===== Session ended 2026-06-11 12:31:16.398 =====
