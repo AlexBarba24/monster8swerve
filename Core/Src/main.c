@@ -59,13 +59,13 @@ typedef struct {
 } MotorControllerContext;
 
 typedef enum {
-    CMD_NONE = 0,
-    CMD_MOVE_ABS,
-    CMD_MOVE_REL,
-    CMD_SET_SPEED,
-    CMD_STOP,
-    CMD_DISABLE,
-    CMD_GET_STATUS
+    CMD_NONE = 0x000,
+    CMD_MOVE_ABS = 0x001,
+    CMD_MOVE_REL = 0x010,
+    CMD_SET_SPEED = 0x011,
+    CMD_STOP = 0x100,
+    CMD_DISABLE = 0x101,
+    CMD_STATUS = 0x110
 } CommandType;
 
 typedef enum {
@@ -103,6 +103,8 @@ typedef struct {
 
 #define NUM_ENCODERS 4
 #define ENCODER_CHANNEL_OFFSET 4
+#define INF 0x7FFFFFFF
+#define NINF 0xFFFFFFFF
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -213,11 +215,10 @@ void HandleUsbCommand(const char *line)
 
     int motor_id;
     long target;
-    unsigned long speed;
+    long speed;
     printf("Parsing Command: %s\r\n", line);
     osDelay(5);
-    if (sscanf(line, "MOVE %d %ld %lu", &motor_id, &target, &speed) == 3)
-    {
+    if (sscanf(line, "MOVEABS %d %ld %ld", &motor_id, &target, &speed) == 3) {
         cmd.source = TRANSPORT_USB;
         cmd.type = CMD_MOVE_ABS;
         cmd.motor_id = motor_id;
@@ -225,15 +226,111 @@ void HandleUsbCommand(const char *line)
         cmd.speed = speed;
         osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
         if (status == osOK) {
-            printf("OK QUEUED MOVE %d %ld %lu\r\n", motor_id, target, speed);
+            printf("OK QUEUED MOVEABS %d %ld %ld\r\n", motor_id, target, speed);
         }
         else {
             printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
         }
-
         return;
     }
+    if (sscanf(line, "MOVEREL %d %ld %ld", &motor_id, &target, &speed) == 3){
+    	cmd.source = TRANSPORT_USB;
+		cmd.type = CMD_MOVE_REL;
+		cmd.motor_id = motor_id;
+		cmd.target = target;
+		cmd.speed = speed;
+		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+		if (status == osOK) {
+			printf("OK QUEUED MOVEREL %d %ld %ld\r\n", motor_id, target, speed);
+		}
+		else {
+			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+		}
+		return;
+    }
+    if (sscanf(line, "MOVESPEED %d %ld", &motor_id, &speed) == 2){
+		cmd.source = TRANSPORT_USB;
+		cmd.type = CMD_MOVE_REL;
+		cmd.motor_id = motor_id;
+		cmd.target = speed < 0 ? NINF : INF;
+		cmd.speed = speed;
+		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+		if (status == osOK) {
+			printf("OK QUEUED MOVESPEED %d %ld\r\n", motor_id, speed);
+		}
+		else {
+			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+		}
+		return;
+	}
+    if (sscanf(line, "STOP %d", &motor_id) == 3){
+		cmd.source = TRANSPORT_USB;
+		cmd.type = CMD_STOP;
+		cmd.motor_id = motor_id;
+		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+		if (status == osOK) {
+			printf("OK QUEUED STOP %d\r\n", motor_id);
+		}
+		else {
+			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+		}
+		return;
+	}
+    if (sscanf(line, "DISABLE %d", &motor_id) == 3){
+    		cmd.source = TRANSPORT_USB;
+    		cmd.type = CMD_DISABLE;
+    		cmd.motor_id = motor_id;
+    		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+    		if (status == osOK) {
+    			printf("OK QUEUED DISABLE %d\r\n", motor_id);
+    		}
+    		else {
+    			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+    		}
+    		return;
+    	}
+    if (sscanf(line, "STATUS %d", &motor_id) == 3){
+		cmd.source = TRANSPORT_USB;
+		cmd.type = CMD_STATUS;
+		cmd.motor_id = motor_id;
+		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+		if (status == osOK) {
+			printf("OK QUEUED STOP %d\r\n", motor_id);
+		}
+		else {
+			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+		}
+		return;
+	}
     printf("Invalid Command Received.\r\n");
+}
+
+
+/**
+  * @brief  Returns a uint32_t command for montor controller task notifications.
+  *
+  *
+  * @param  target the target position to move stepper.
+  * @param  dir the sign of the speed.
+  *          This parameter can be one of GPIO_PIN_x where x can be (0..15).
+  * @param  speed the speed for the command.
+  * @retval uint32_t command.
+  */
+int encodeCommand(int16_t target, uint8_t dir, uint8_t speed, CommandType cmd){
+	return (((((target << 1) + (dir & 0x1)) << 8) + speed) << 3) + cmd;
+}
+
+int16_t decodeSpeed(uint32_t input) {
+	int dir = (input >> 11) & 0x1;
+	return (dir * -1) * ((input >> 3) & 0xFF);
+}
+
+CommandType decodeCommand(uint32_t input) {
+	return input & 0x7;
+}
+
+int16_t decodeTarget(uint32_t input) {
+	return (input >> 12) & 0xFFFF;
 }
 
 /* USER CODE END 0 */
@@ -624,42 +721,31 @@ void StartTask1(void *argument)
 		{
 			printf("Received Command!\r\n");
 
-			switch (cmd.type)
+			if (cmd.motor_id >= NUM_STEPPERS)
 			{
-				case CMD_MOVE_ABS:
-				{
-					if (cmd.motor_id >= NUM_STEPPERS)
-					{
-						printf("ERR BAD MOTOR ID %d\r\n", cmd.motor_id);
-						break;
-					}
-
-					if (motorTaskHandles[cmd.motor_id] == NULL)
-					{
-						printf("ERR MOTOR HANDLE NULL %d\r\n", cmd.motor_id);
-						break;
-					}
-
-					uint32_t notifyValue =
-						(((uint32_t)cmd.target) << 2) |
-						(MODE_POS << 1) |
-						MOTOR_CMD_RUN;
-
-					BaseType_t result = xTaskNotify(
-						motorTaskHandles[cmd.motor_id],
-						notifyValue,
-						eSetValueWithOverwrite
-					);
-
-					printf("Notify result=%ld\r\n", (long)result);
-
-					break;
-				}
-
-				default:
-					printf("Command Scheduler received bad command.\r\n");
-					break;
+				printf("ERR BAD MOTOR ID %d\r\n", cmd.motor_id);
+				break;
 			}
+
+			if (motorTaskHandles[cmd.motor_id] == NULL)
+			{
+				printf("ERR MOTOR HANDLE NULL %d\r\n", cmd.motor_id);
+				break;
+			}
+
+			uint32_t notifyValue = encodeCommand(cmd.target, 0, cmd.speed, cmd.type);
+
+			BaseType_t result = xTaskNotify(
+				motorTaskHandles[cmd.motor_id],
+				notifyValue,
+				eSetValueWithOverwrite
+			);
+
+			printf("Notify result=%ld\r\n", (long)result);
+
+			break;
+
+
 		}
 	}
   /* USER CODE END 5 */
@@ -677,12 +763,61 @@ void StartTask2(void *argument)
   /* USER CODE BEGIN StartTask2 */
 	uint32_t ulNotifiedValue;
 	MotorControllerContext *context = (MotorControllerContext*) argument;
+	StepperMotor* stepper = context->stepper;
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
 
 	/* Infinite loop */
 	for(;;)
 	{
         if (xTaskNotifyWait(0, 0xFFFF, &ulNotifiedValue, portMAX_DELAY)==pdTRUE){
+        	CommandType command = decodeCommand(ulNotifiedValue);
+        	switch (command) {
+        		case CMD_STATUS: {
+        			printf(
+						"Motor (%d) Status: target=%ld, speed=%lu, enabled=%d, mode=%s",
+						context->id,
+						stepper->target,
+						stepper->speed,
+						stepper->enabled,
+						stepper->mode == MODE_POS ? "position" : "speed"
+					);
+        			break;
+        		}
+        		case CMD_STOP: {
+        			stepper->speed = 0;
+        			stepper->mode = MODE_SPEED;
+        			stepper->enabled = 1;
+        		}
+        		case CMD_DISABLE: {
+        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
+        			break;
+        		}
+        		case CMD_SET_SPEED:
+        		case CMD_MOVE_REL:
+        		case CMD_MOVE_ABS: {
+        			stepper->target = decodeTarget(ulNotifiedValue);
+        			if (CMD_MOVE_REL) {
+        				stepper->target += stepper->position;
+        			}
+        			uint8_t speed = decodeSpeed(ulNotifiedValue);
+        			if(command == CMD_SET_SPEED && speed == 0)
+        				stepper->speed = 0;
+					else
+						stepper->speed = speed == 0 ? DEFAULT_SPEED : speed;
+        			stepper->mode = MODE_POS;
+        			stepper->enabled = 1;
+        			stepper->accumulator = 0;
+        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
+					HAL_GPIO_WritePin(
+							context->stepper->dir_port,
+							context->stepper->dir_pin,
+							context->stepper->target < context->stepper->position
+					);
+        			break;
+        		}
+        		default:
+        			printf("Motor (%d), recieved invalid command %lu.", context->id, ulNotifiedValue);
+        	}
         	printf("Received Task Notification: (%ld)\r\n", ulNotifiedValue);
         	uint8_t enabled = ulNotifiedValue & MOTOR_CMD_RUN;
         	int32_t target = ulNotifiedValue >> 2;

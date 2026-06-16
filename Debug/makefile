@@ -1,6 +1,6 @@
 ################################################################################
 # Automatically-generated file. Do not edit!
-# Toolchain: GNU Tools for STM32 (14.3.rel1)
+# Toolchain: GNU Tools for STM32 (13.3.rel1)
 ################################################################################
 
 -include ../makefile.init
@@ -71,8 +71,8 @@ all: main-build
 main-build: monster8swerve.elf secondary-outputs
 
 # Tool invocations
-monster8swerve.elf monster8swerve.map: $(OBJS) $(USER_OBJS) C:\Users\alex\Documents\monster8swerve\STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "monster8swerve.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Users\alex\Documents\monster8swerve\STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="monster8swerve.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+monster8swerve.elf monster8swerve.map: $(OBJS) $(USER_OBJS) /Users/alex/Documents/projects/monster8swerve/STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "monster8swerve.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/alex/Documents/projects/monster8swerve/STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="monster8swerve.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
