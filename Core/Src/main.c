@@ -122,7 +122,7 @@ TIM_HandleTypeDef htim2;
 osThreadId_t commandScheduleHandle;
 const osThreadAttr_t commandSchedule_attributes = {
   .name = "commandSchedule",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for motorController */
@@ -136,15 +136,15 @@ const osThreadAttr_t motorController_attributes = {
 osThreadId_t loggerHandle;
 const osThreadAttr_t logger_attributes = {
   .name = "logger",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for usbCommand */
 osThreadId_t usbCommandHandle;
 const osThreadAttr_t usbCommand_attributes = {
   .name = "usbCommand",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 /* USER CODE BEGIN PV */
 StepperMotor steppers[NUM_STEPPERS];
@@ -369,13 +369,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  usbRxStream = xStreamBufferCreate(USB_RX_STREAM_SIZE, 1);
-  usbTxStream = xStreamBufferCreate(USB_TX_STREAM_SIZE, 1);
-
-  if (usbRxStream == NULL || usbTxStream == NULL)
-  {
-      Error_Handler();
-  }
+  __set_BASEPRI(0U);
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -384,6 +378,8 @@ int main(void)
   MX_TIM2_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim2);
+
   MotorContexts_Init();
   HAL_StatusTypeDef adc_status =
       HAL_ADC_Start_DMA(&hadc1, (uint32_t *)encoder_adc, NUM_ENCODERS);
@@ -425,7 +421,7 @@ int main(void)
   commandScheduleHandle = osThreadNew(StartTask1, NULL, &commandSchedule_attributes);
 
   /* creation of motorController */
-  motorControllerHandle = osThreadNew(StartTask2, NULL, &motorController_attributes);
+//  motorControllerHandle = osThreadNew(StartTask2, NULL, &motorController_attributes);
 
   /* creation of logger */
   loggerHandle = osThreadNew(StartTask03, NULL, &logger_attributes);
@@ -604,7 +600,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 83;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 9;
+  htim2.Init.Period = 99;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -701,10 +697,9 @@ static void MX_GPIO_Init(void)
 void StartTask1(void *argument)
 {
   /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
+//  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
 	ControllerCommand cmd;
-	HAL_TIM_Base_Start_IT(&htim2);
 
 	for (;;)
 	{
@@ -861,7 +856,7 @@ void StartTask03(void *argument)
 	         encoder_adc[1],
 	         encoder_adc[2],
 	         encoder_adc[3]);
-	  osDelay(1000);
+	  osDelay(10000);
   }
   /* USER CODE END StartTask03 */
 }
@@ -876,10 +871,17 @@ void StartTask03(void *argument)
 void StartTask04(void *argument)
 {
   /* USER CODE BEGIN StartTask04 */
+	usbRxStream = xStreamBufferCreate(USB_RX_STREAM_SIZE, 1);
+	usbTxStream = xStreamBufferCreate(USB_TX_STREAM_SIZE, 1);
+
+	if (usbRxStream == NULL || usbTxStream == NULL)
+	{
+	  Error_Handler();
+	}
+	MX_USB_DEVICE_Init();
 	char line[USB_LINE_MAX];
 	size_t line_len = 0;
 	uint8_t ch;
-
 	for (;;)
 	{
 		if (xStreamBufferReceive(usbRxStream, &ch, 1, portMAX_DELAY) == 1)
