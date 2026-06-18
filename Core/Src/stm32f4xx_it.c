@@ -51,7 +51,34 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* Interrupt-free PB6 helpers defined in main.c (DWT-based, no HAL tick). */
+extern void Dbg_DelayInit(void);
+extern void Dbg_DelayMs(uint32_t ms);
+extern void Dbg_PB6_Init(void);
 
+/* Never-ending fault indicator on PB6 (motor-enable, active low). Repeats
+   'code' long ENABLED pulses, then a long DISABLED gap, forever. This is
+   distinct from the finite boot pulse groups (1..5) and from Error_Handler's
+   steady 1 s toggle, so a frozen CPU fault is no longer invisible.
+     1 = HardFault   2 = MemManage   3 = BusFault   4 = UsageFault
+   Decode the exact faulting instruction afterwards by halting with the
+   debugger, or read the stacked PC. */
+static void Fault_Blink(uint8_t code)
+{
+  Dbg_DelayInit();
+  Dbg_PB6_Init();
+  for (;;)
+  {
+    for (uint8_t i = 0; i < code; i++)
+    {
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); /* enabled  */
+      Dbg_DelayMs(1500U);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   /* disabled */
+      Dbg_DelayMs(1000U);
+    }
+    Dbg_DelayMs(3000U); /* long disabled gap before repeating the group */
+  }
+}
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -88,7 +115,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  Fault_Blink(1); /* repeating groups of 1 enabled pulse = HardFault (never returns) */
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -103,7 +130,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  Fault_Blink(2); /* repeating groups of 2 enabled pulses = MemManage fault */
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -118,7 +145,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  Fault_Blink(3); /* repeating groups of 3 enabled pulses = BusFault */
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -133,7 +160,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  Fault_Blink(4); /* repeating groups of 4 enabled pulses = UsageFault */
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

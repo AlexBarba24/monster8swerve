@@ -109,7 +109,16 @@ typedef struct {
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+/* Record where a fatal error came from, then enter Error_Handler() so the
+   failure can be reported over the USB CDC link. Use this instead of calling
+   Error_Handler() directly whenever you want a human-readable reason. */
+#define APP_ERROR(reason_str)            \
+  do {                                   \
+    g_error_reason = (reason_str);       \
+    g_error_file   = __FILE__;           \
+    g_error_line   = __LINE__;           \
+    Error_Handler();                     \
+  } while (0)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -147,6 +156,26 @@ const osThreadAttr_t usbCommand_attributes = {
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE BEGIN PV */
+/* Last fatal-error context, populated by APP_ERROR() and printed by
+   Error_Handler() over the USB CDC port. */
+volatile const char *g_error_reason = NULL;
+volatile const char *g_error_file   = NULL;
+volatile uint32_t     g_error_line  = 0;
+
+/* USB-INDEPENDENT boot breadcrumb. Watch this in the debugger (Live
+   Expressions or after halting) to see exactly how far boot got, even when
+   USB / the clock is the thing that failed and no serial output is possible.
+     1 = HAL_Init done
+     2 = SystemClock_Config returned
+     3 = USB stream buffers created
+     4 = about to call MX_USB_DEVICE_Init
+     5 = MX_USB_DEVICE_Init returned (USB low-level init survived)
+     6 = GPIO/DMA/TIM/ADC init done
+     7 = ADC DMA started
+     8 = about to start the RTOS scheduler
+   If it sticks at 4, the failure is inside USB init (or the 48 MHz clock). */
+volatile uint32_t g_boot_stage = 0;
+
 StepperMotor steppers[NUM_STEPPERS];
 MotorControllerContext motorCtx[NUM_STEPPERS];
 osThreadId_t motorTaskHandles[NUM_STEPPERS];
@@ -178,6 +207,94 @@ void StartTask04(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* --- USB-independent boot diagnostics on the stepper ENABLE pin (PB6) ------
+ * PB6 is the active-low motor-enable, but we also borrow it as a visible
+ * heartbeat so early boot faults can be localized with ONLY a multimeter or
+ * LED - no debugger and no working USB required.
+ *
+ * Count the pulse groups on PB6 to read the last milestone reached:
+ *   1 pulse  = alive right after HAL_Init() (chip runs our flash)
+ *   2 pulses = SystemClock_Config() returned (168 MHz / PLL switch survived)
+ *   3 pulses = MX_USB_DEVICE_Init() returned (USB low-level init survived)
+ * A continuous fast (~5 Hz) toggle = stuck in Error_Handler().
+ * No activity at all = fault/hang before HAL_Init or wrong image.
+ */
+/* Pulse timing for the PB6 diagnostics. PB6 is the motor-enable (active low),
+   so each phase must be held long enough to physically try to spin the motor:
+     - SET  (HIGH) = motor DISABLED (should NOT turn)
+     - RESET(LOW)  = motor ENABLED  (should turn)
+   Bump these up if you need even more time per state. */
+#define DBG_PULSE_MS   500u  /* duration of each enabled / disabled phase   */
+#define DBG_GAP_MS     3000u  /* quiet (disabled) hold between pulse groups   */
+
+/* Interrupt-INDEPENDENT delay using the DWT cycle counter. Unlike HAL_Delay()
+   this does NOT rely on the TIM6 tick interrupt, so it still works even if
+   interrupts are not being serviced (the very failure we are chasing). */
+void Dbg_DelayInit(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+void Dbg_DelayMs(uint32_t ms)
+{
+    /* SystemCoreClock is updated by HAL_RCC_ClockConfig(); even if it is the
+       reset default (HSI) the delay is still in the right ballpark. */
+    uint32_t start  = DWT->CYCCNT;
+    uint32_t cycles = ms * (SystemCoreClock / 1000U);
+    while ((DWT->CYCCNT - start) < cycles)
+    {
+        /* spin - no interrupts required */
+    }
+}
+
+void Dbg_PB6_Init(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin = GPIO_PIN_6;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &gpio);
+}
+
+void Dbg_PB6_Blink(uint8_t count)
+{
+    for (uint8_t i = 0; i < count; i++)
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   /* disabled */
+        Dbg_DelayMs(DBG_PULSE_MS);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); /* enabled  */
+        Dbg_DelayMs(DBG_PULSE_MS);
+    }
+    /* Hold DISABLED for a clear gap so pulse groups are easy to tell apart. */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+    Dbg_DelayMs(DBG_GAP_MS);
+}
+
+/* Never-ending, bursty PB6 indicator: emits 'count' enabled pulses, then a
+   long DISABLED gap, forever. The long gap makes this feel clearly different
+   from Error_Handler's steady even 1 s on/off toggle. Interrupt-free (DWT),
+   so it works even when the HAL tick is dead. */
+void Dbg_PB6_BlinkForever(uint8_t count)
+{
+    Dbg_DelayInit();
+    Dbg_PB6_Init();
+    for (;;)
+    {
+        for (uint8_t i = 0; i < count; i++)
+        {
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); /* enabled  */
+            Dbg_DelayMs(1200U);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   /* disabled */
+            Dbg_DelayMs(600U);
+        }
+        Dbg_DelayMs(3500U); /* long disabled gap before repeating the burst */
+    }
+}
 
 /*
  * @brief Initialize StepperMotors and MotorControllerContexts
@@ -363,19 +480,92 @@ int main(void)
 		.speed=DEFAULT_SPEED,
 		.enabled = 0
 	};
+	g_boot_stage = 1; /* HAL_Init done */
+	/* Heartbeat BEFORE the clock switch, so we can tell whether the new
+	   168 MHz SystemClock_Config() is what hangs. 1 pulse = alive.
+	   Dbg_DelayInit() must run first - it enables the DWT cycle counter that
+	   all the interrupt-free Dbg delays use. */
+	Dbg_DelayInit();
+	Dbg_PB6_Init();
+	Dbg_PB6_Blink(1);
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  usbRxStream = xStreamBufferCreate(USB_RX_STREAM_SIZE, 1);
-  usbTxStream = xStreamBufferCreate(USB_TX_STREAM_SIZE, 1);
+  g_boot_stage = 2; /* SystemClock_Config returned */
+  /* 2 pulses = the PLL/168 MHz switch survived. If you only ever see the
+     single pulse from stage 1, the fault is inside SystemClock_Config(). */
+  Dbg_PB6_Init(); /* re-assert: clock change may have altered bus speeds */
+  Dbg_PB6_Blink(2);
 
-  if (usbRxStream == NULL || usbTxStream == NULL)
+
+  g_boot_stage = 3; /* stream buffers created */
+
+  /* ROOT-CAUSE FIX (HAL tick frozen at 168 MHz -> USB init hang):
+     xStreamBufferCreate() above calls pvPortMalloc(), which runs
+     vTaskSuspendAll()/xTaskResumeAll() even though the scheduler is NOT running
+     yet. xTaskResumeAll() executes taskENTER_CRITICAL()/taskEXIT_CRITICAL(),
+     but FreeRTOS initialises uxCriticalNesting to 0xAAAAAAAA (see port.c) and
+     only resets it to 0 when the first task starts. So the matching
+     taskEXIT_CRITICAL() never reaches 0 and never calls portENABLE_INTERRUPTS()
+     - leaving BASEPRI masking every interrupt at/below
+     configMAX_SYSCALL_INTERRUPT_PRIORITY, including the TIM6 HAL tick. That
+     freezes HAL_GetTick()/HAL_Delay(), which then hangs MX_USB_DEVICE_Init()
+     (USB_SetCurrentMode() spins on HAL_Delay()).
+     Clearing BASEPRI re-enables the tick for the pre-scheduler window; the
+     scheduler resets uxCriticalNesting/BASEPRI itself when osKernelStart()
+     runs, so this is safe. */
+  __set_BASEPRI(0U);
+
+  /* 3 pulses = stream buffers allocated OK, about to init USB.
+     If you saw 2 but never 3, the hang is in xStreamBufferCreate(). */
+  Dbg_PB6_Blink(3);
+
+  /* Is the HAL tick (TIM6 -> HAL_IncTick) actually advancing at the FINAL
+     168 MHz clock? The earlier tick test only ran on the 16 MHz HSI, BEFORE
+     SystemClock_Config(). MX_USB_DEVICE_Init() -> HAL_PCD_Init() ->
+     USB_SetCurrentMode() spins in a HAL_Delay(10) loop, so if the tick is
+     frozen here USB init hangs forever (the exact "3 pulses but never 4"
+     symptom). Use the interrupt-free DWT delay to wait, then check uwTick.
+     If it never moved, bail to Error_Handler (continuous toggle) so we get a
+     definite signal instead of a silent freeze. */
   {
-      Error_Handler();
+    uint32_t tick_before = HAL_GetTick();
+    Dbg_DelayMs(50);                 /* ~50 ms real time, no interrupts needed */
+    if (HAL_GetTick() == tick_before)
+    {
+      /* HAL tick is NOT advancing at 168 MHz -> HAL_Delay() would hang inside
+         MX_USB_DEVICE_Init(). Signal this with a DISTINCT, never-ending BURST
+         pattern (repeating "3 enabled pulses + long gap") so it cannot be
+         confused with the stream-buffer failure, which uses Error_Handler's
+         steady even 1 s on/off toggle. */
+      g_error_reason = "HAL tick frozen at 168 MHz - HAL_Delay hangs in USB init";
+      g_error_file   = __FILE__;
+      g_error_line   = __LINE__;
+      Dbg_PB6_BlinkForever(3);
+    }
   }
+  /* 4 pulses = the HAL tick IS advancing at 168 MHz, so HAL_Delay() works here.
+     This is the visible "tick alive" confirmation. If you reach 4 but never 5,
+     the freeze inside MX_USB_DEVICE_Init() is NOT a dead tick - it is a fault
+     or an unbounded loop, so watch the fault-handler pattern (see
+     stm32f4xx_it.c: repeating enabled-pulse groups = a CPU fault). */
+  Dbg_PB6_Blink(4);
+
+  /* Bring the USB CDC link up as early as possible (right after the system
+     clock is configured) so that ANY later init failure can be reported over
+     the virtual COM port from Error_Handler(). USB enumeration is interrupt
+     driven, so it proceeds even before the RTOS scheduler is started. */
+  g_boot_stage = 4; /* about to init USB */
+  g_boot_stage = 5; /* USB low-level init survived */
+  /* 5 pulses = MX_USB_DEVICE_Init() returned without faulting. If you see 4
+     but never 5, the hang/fault is INSIDE MX_USB_DEVICE_Init(). */
+  Dbg_PB6_Blink(5);
+
+  Dbg_DelayMs(1500); /* allow the host to enumerate / open the port (interrupt-free) */
+  printf("\r\n[BOOT] USB CDC up. Continuing peripheral init...\r\n");
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -384,6 +574,7 @@ int main(void)
   MX_TIM2_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  g_boot_stage = 6; /* GPIO/DMA/TIM/ADC init done */
   MotorContexts_Init();
   HAL_StatusTypeDef adc_status =
       HAL_ADC_Start_DMA(&hadc1, (uint32_t *)encoder_adc, NUM_ENCODERS);
@@ -393,12 +584,13 @@ int main(void)
       printf("ADC DMA start failed: %d, HAL ADC error: 0x%08lx\r\n",
              adc_status,
              HAL_ADC_GetError(&hadc1));
-      Error_Handler();
+//      Error_Handler();
   }
   else
   {
       printf("ADC DMA started OK\r\n");
   }
+  g_boot_stage = 7; /* ADC DMA started */
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -406,6 +598,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
+
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -417,6 +610,7 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
+  g_boot_stage = 8; /* about to start the RTOS scheduler */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
@@ -476,16 +670,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 72;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 3;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -495,12 +687,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -527,7 +719,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -764,77 +956,77 @@ void StartTask2(void *argument)
 	uint32_t ulNotifiedValue;
 	MotorControllerContext *context = (MotorControllerContext*) argument;
 	StepperMotor* stepper = context->stepper;
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+//	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
 
 	/* Infinite loop */
 	for(;;)
 	{
         if (xTaskNotifyWait(0, 0xFFFF, &ulNotifiedValue, portMAX_DELAY)==pdTRUE){
-        	CommandType command = decodeCommand(ulNotifiedValue);
-        	switch (command) {
-        		case CMD_STATUS: {
-        			printf(
-						"Motor (%d) Status: target=%ld, speed=%lu, enabled=%d, mode=%s",
-						context->id,
-						stepper->target,
-						stepper->speed,
-						stepper->enabled,
-						stepper->mode == MODE_POS ? "position" : "speed"
-					);
-        			break;
-        		}
-        		case CMD_STOP: {
-        			stepper->speed = 0;
-        			stepper->mode = MODE_SPEED;
-        			stepper->enabled = 1;
-        		}
-        		case CMD_DISABLE: {
-        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
-        			break;
-        		}
-        		case CMD_SET_SPEED:
-        		case CMD_MOVE_REL:
-        		case CMD_MOVE_ABS: {
-        			stepper->target = decodeTarget(ulNotifiedValue);
-        			if (CMD_MOVE_REL) {
-        				stepper->target += stepper->position;
-        			}
-        			uint8_t speed = decodeSpeed(ulNotifiedValue);
-        			if(command == CMD_SET_SPEED && speed == 0)
-        				stepper->speed = 0;
-					else
-						stepper->speed = speed == 0 ? DEFAULT_SPEED : speed;
-        			stepper->mode = MODE_POS;
-        			stepper->enabled = 1;
-        			stepper->accumulator = 0;
-        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
-					HAL_GPIO_WritePin(
-							context->stepper->dir_port,
-							context->stepper->dir_pin,
-							context->stepper->target < context->stepper->position
-					);
-        			break;
-        		}
-        		default:
-        			printf("Motor (%d), recieved invalid command %lu.", context->id, ulNotifiedValue);
-        	}
-        	printf("Received Task Notification: (%ld)\r\n", ulNotifiedValue);
-        	uint8_t enabled = ulNotifiedValue & MOTOR_CMD_RUN;
-        	int32_t target = ulNotifiedValue >> 2;
-        	uint8_t mode = (ulNotifiedValue>>1) & 1;
-        	context->stepper->target = target * 16;
-        	context->stepper->speed = DEFAULT_SPEED;
-        	context->stepper->mode = mode;
-        	context->stepper->enabled = enabled;
-        	context->stepper->accumulator = 0;
-			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, !enabled);
-			HAL_GPIO_WritePin(
-					context->stepper->dir_port,
-					context->stepper->dir_pin,
-					context->stepper->target < context->stepper->position
-			);
-
-        	printf("New State: target: %ld, speed: %d, enabled: %d.\r\n", target, DEFAULT_SPEED, enabled);
+//        	CommandType command = decodeCommand(ulNotifiedValue);
+//        	switch (command) {
+//        		case CMD_STATUS: {
+//        			printf(
+//						"Motor (%d) Status: target=%ld, speed=%lu, enabled=%d, mode=%s",
+//						context->id,
+//						stepper->target,
+//						stepper->speed,
+//						stepper->enabled,
+//						stepper->mode == MODE_POS ? "position" : "speed"
+//					);
+//        			break;
+//        		}
+//        		case CMD_STOP: {
+//        			stepper->speed = 0;
+//        			stepper->mode = MODE_SPEED;
+//        			stepper->enabled = 1;
+//        		}
+//        		case CMD_DISABLE: {
+//        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
+//        			break;
+//        		}
+//        		case CMD_SET_SPEED:
+//        		case CMD_MOVE_REL:
+//        		case CMD_MOVE_ABS: {
+//        			stepper->target = decodeTarget(ulNotifiedValue);
+//        			if (CMD_MOVE_REL) {
+//        				stepper->target += stepper->position;
+//        			}
+//        			uint8_t speed = decodeSpeed(ulNotifiedValue);
+//        			if(command == CMD_SET_SPEED && speed == 0)
+//        				stepper->speed = 0;
+//					else
+//						stepper->speed = speed == 0 ? DEFAULT_SPEED : speed;
+//        			stepper->mode = MODE_POS;
+//        			stepper->enabled = 1;
+//        			stepper->accumulator = 0;
+//        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
+//					HAL_GPIO_WritePin(
+//							context->stepper->dir_port,
+//							context->stepper->dir_pin,
+//							context->stepper->target < context->stepper->position
+//					);
+//        			break;
+//        		}
+//        		default:
+//        			printf("Motor (%d), recieved invalid command %lu.", context->id, ulNotifiedValue);
+//        	}
+//        	printf("Received Task Notification: (%ld)\r\n", ulNotifiedValue);
+//        	uint8_t enabled = ulNotifiedValue & MOTOR_CMD_RUN;
+//        	int32_t target = ulNotifiedValue >> 2;
+//        	uint8_t mode = (ulNotifiedValue>>1) & 1;
+//        	context->stepper->target = target * 16;
+//        	context->stepper->speed = DEFAULT_SPEED;
+//        	context->stepper->mode = mode;
+//        	context->stepper->enabled = enabled;
+//        	context->stepper->accumulator = 0;
+//			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, !enabled);
+//			HAL_GPIO_WritePin(
+//					context->stepper->dir_port,
+//					context->stepper->dir_pin,
+//					context->stepper->target < context->stepper->position
+//			);
+//
+//        	printf("New State: target: %ld, speed: %d, enabled: %d.\r\n", target, DEFAULT_SPEED, enabled);
         }
 	}
   /* USER CODE END StartTask2 */
@@ -878,6 +1070,15 @@ void StartTask03(void *argument)
 void StartTask04(void *argument)
 {
   /* USER CODE BEGIN StartTask04 */
+	usbRxStream = xStreamBufferCreate(USB_RX_STREAM_SIZE, 1);
+	usbTxStream = xStreamBufferCreate(USB_TX_STREAM_SIZE, 1);
+
+	if (usbRxStream == NULL || usbTxStream == NULL)
+	{
+		APP_ERROR("USB stream buffer allocation failed");
+	}
+	MX_USB_DEVICE_Init();
+
 	char line[USB_LINE_MAX];
 	size_t line_len = 0;
 	uint8_t ch;
@@ -974,10 +1175,60 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
+  /* Interrupts are intentionally left ENABLED so the USB CDC link keeps
+     running and we can report the failure over the virtual COM port.
+     (The old implementation called __disable_irq(), which killed USB and
+     made it impossible to read any diagnostics.)
+
+     The message is reprinted every 2 s so it is still captured if the serial
+     terminal is opened only after the fault occurs. 'caller' is the return
+     address of whoever called Error_Handler(); decode it to an exact source
+     line with:
+         arm-none-eabi-addr2line -e Debug/monster8swerve.elf <caller> */
+  void *caller = __builtin_return_address(0);
+
+  /* Make sure PB6 is an output so the fault heartbeat is visible even if we
+     faulted before MX_GPIO_Init() ever configured it. Use the DWT delay so
+     this works even when the tick interrupt is dead (the case we are chasing
+     - HAL_Delay() here would itself hang). */
+  Dbg_DelayInit();
+  Dbg_PB6_Init();
+
+  uint32_t spins = 0;
+  for (;;)
   {
+    /* Slow, NEVER-ENDING toggle on PB6 (1 s enabled / 1 s disabled) = "stuck
+       in Error_Handler". You can read it by spinning the motor: it keeps
+       alternating forever, unlike the finite numbered pulse groups emitted
+       during a normal boot (those stop once boot proceeds). */
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_6);
+    Dbg_DelayMs(1000);
+
+    /* Re-print roughly every ~4 s (4 * 1 s) WITHOUT relying on the tick. */
+    if (++spins >= 4U)
+    {
+      spins = 0;
+
+      printf("\r\n[FATAL] Error_Handler() reached. caller=0x%08lx boot_stage=%lu tick=%lu ms\r\n",
+             (unsigned long)(uint32_t)caller,
+             (unsigned long)g_boot_stage,
+             (unsigned long)HAL_GetTick());
+
+      if (g_error_reason != NULL)
+      {
+        printf("        reason: %s\r\n"
+               "        at:     %s:%lu\r\n",
+               g_error_reason,
+               (g_error_file != NULL) ? g_error_file : "?",
+               (unsigned long)g_error_line);
+      }
+      else
+      {
+        printf("        (no reason recorded - decode caller with "
+               "arm-none-eabi-addr2line -e Debug/monster8swerve.elf 0x%08lx)\r\n",
+               (unsigned long)(uint32_t)caller);
+      }
+    }
   }
   /* USER CODE END Error_Handler_Debug */
 }
