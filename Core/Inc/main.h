@@ -53,7 +53,10 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+#define RESET_CAUSE_STACK_OVERFLOW 1u
+#define RESET_CAUSE_MALLOC_FAILED  2u
+#define RESET_CAUSE_HARDFAULT      3u
+void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

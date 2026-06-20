@@ -42,9 +42,9 @@ typedef struct {
 	volatile uint8_t mode;
 
 	volatile uint32_t accumulator;
-	volatile int32_t target;
-	volatile int32_t position;
-	volatile uint32_t speed;
+	volatile int16_t target;
+	volatile int16_t position;
+	volatile int16_t speed;
 	volatile uint8_t enabled;
 	volatile uint8_t step_high;
 } StepperMotor;
@@ -90,10 +90,10 @@ typedef struct {
 #define MOTOR_CMD_STOP   0x00  // Bit 0: Stop spinning command
 #define MODE_SPEED 0
 #define MODE_POS 1
-#define DEFAULT_SPEED 50
+#define DEFAULT_SPEED 80
 
 #define NUM_STEPPERS 1
-#define MAX_SPEED 0
+#define MAX_SPEED 250
 
 #define USE_USB_COMMANDS 1
 #define USE_CAN_COMMANDS 0
@@ -104,8 +104,9 @@ typedef struct {
 
 #define NUM_ENCODERS 4
 #define ENCODER_CHANNEL_OFFSET 4
-#define INF 0x7FFFFFFF
-#define NINF 0xFFFFFFFF
+#define INF  0x7FFF
+#define NINF 0x8000
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -130,7 +131,7 @@ const osThreadAttr_t commandSchedule_attributes = {
 osThreadId_t motorControllerHandle;
 const osThreadAttr_t motorController_attributes = {
   .name = "motorController",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for logger */
@@ -163,8 +164,6 @@ uint32_t encoder_adc[NUM_ENCODERS];
 
 /* Crash/reset report carried across a reset via a no-init RAM section. */
 #define RESET_REPORT_MAGIC 0xB16B0CA5u
-#define RESET_CAUSE_STACK_OVERFLOW 1u
-#define RESET_CAUSE_MALLOC_FAILED  2u
 typedef struct {
     uint32_t magic;
     uint32_t cause;
@@ -264,7 +263,7 @@ void HandleUsbCommand(const char *line)
     }
     if (sscanf(line, "MOVESPEED %d %ld", &motor_id, &speed) == 2){
 		cmd.source = TRANSPORT_USB;
-		cmd.type = CMD_MOVE_REL;
+		cmd.type = CMD_SET_SPEED;
 		cmd.motor_id = motor_id;
 		cmd.target = speed < 0 ? NINF : INF;
 		cmd.speed = speed;
@@ -330,12 +329,12 @@ void HandleUsbCommand(const char *line)
   * @param  speed the speed for the command.
   * @retval uint32_t command.
   */
-int encodeCommand(int16_t target, uint8_t dir, uint8_t speed, CommandType cmd){
+uint32_t encodeCommand(int16_t target, uint8_t dir, uint8_t speed, CommandType cmd){
 	return (((((target << 1) + (dir & 0x1)) << 8) + speed) << 3) + cmd;
 }
 
 int16_t decodeSpeed(uint32_t input) {
-	int dir = (input >> 11) & 0x1;
+	int dir = (input >> 11) & 0x1 ? 1 : -1;
 	return (dir * -1) * ((input >> 3) & 0xFF);
 }
 
@@ -345,6 +344,36 @@ CommandType decodeCommand(uint32_t input) {
 
 int16_t decodeTarget(uint32_t input) {
 	return (input >> 12) & 0xFFFF;
+}
+
+static void MotorController_HandlePosMove(
+	MotorControllerContext *context,
+	StepperMotor *stepper,
+	uint32_t ulNotifiedValue,
+	CommandType command,
+	bool relative)
+{
+	int32_t target = decodeTarget(ulNotifiedValue);
+	if (relative) {
+		target += stepper->position;
+	}
+	stepper->target = target;
+
+	uint8_t speed = decodeSpeed(ulNotifiedValue);
+	if (command == CMD_SET_SPEED && speed == 0) {
+		stepper->speed = 0;
+	} else {
+		stepper->speed = speed == 0 ? DEFAULT_SPEED : abs(speed);
+	}
+	stepper->mode = MODE_POS;
+	stepper->enabled = 1;
+	stepper->accumulator = 0;
+	HAL_GPIO_WritePin(context->enable_port, context->enable_pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(
+		stepper->dir_port,
+		stepper->dir_pin,
+		stepper->target < stepper->position ? GPIO_PIN_SET : GPIO_PIN_RESET
+	);
 }
 
 /* USER CODE END 0 */
@@ -679,7 +708,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
 
   /*Configure GPIO pins : PD11 PD12 PD13 */
   GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13;
@@ -708,7 +737,7 @@ static void MX_GPIO_Init(void)
  * already-corrupted stack, and USB transmit relies on IRQs we can't trust. The
  * cause is printed cleanly on the next boot once USB is healthy again.
  */
-static void RecordResetAndReboot(uint32_t cause, const char *name)
+void RecordResetCauseAndReboot(uint32_t cause, const char *name)
 {
     g_reset_report.magic = RESET_REPORT_MAGIC;
     g_reset_report.cause = cause;
@@ -730,12 +759,12 @@ static void RecordResetAndReboot(uint32_t cause, const char *name)
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask;
-    RecordResetAndReboot(RESET_CAUSE_STACK_OVERFLOW, pcTaskName);
+    RecordResetCauseAndReboot(RESET_CAUSE_STACK_OVERFLOW, pcTaskName);
 }
 
 void vApplicationMallocFailedHook(void)
 {
-    RecordResetAndReboot(RESET_CAUSE_MALLOC_FAILED, "heap");
+    RecordResetCauseAndReboot(RESET_CAUSE_MALLOC_FAILED, "heap");
 }
 
 /* Print (and clear) any reset cause persisted from a previous crash. */
@@ -754,6 +783,10 @@ void ReportPreviousReset(void)
     else if (g_reset_report.cause == RESET_CAUSE_MALLOC_FAILED)
     {
         cause_str = "MALLOC FAILED";
+    }
+    else if (g_reset_report.cause == RESET_CAUSE_HARDFAULT)
+    {
+        cause_str = "HARD FAULT";
     }
 
     printf("\r\n*** PREVIOUS RESET CAUSE: %s (task: '%s') ***\r\n",
@@ -804,6 +837,20 @@ void StartTask1(void *argument)
 				break;
 			}
 
+			if (cmd.type == CMD_STATUS) {
+				StepperMotor *stepper = motorCtx[cmd.motor_id].stepper;
+				printf(
+					"Motor (%d) Status: target=%d, position=%d, speed=%d, enabled=%d, mode=%s\r\n",
+					cmd.motor_id,
+					stepper->target,
+					stepper->position,
+					stepper->speed,
+					stepper->enabled,
+					stepper->mode == MODE_POS ? "position" : "speed"
+				);
+				continue;
+			}
+
        printf("Setting Stepper target: %ld, speed: %lu\r\n", cmd.target, cmd.speed);
 			uint32_t notifyValue = encodeCommand(cmd.target, 0, cmd.speed, cmd.type);
 
@@ -832,80 +879,37 @@ void StartTask2(void *argument)
 	uint32_t ulNotifiedValue;
 	MotorControllerContext *context = (MotorControllerContext*) argument;
 	StepperMotor* stepper = context->stepper;
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
 
 	/* Infinite loop */
 	for(;;)
 	{
         if (xTaskNotifyWait(0, 0xFFFF, &ulNotifiedValue, osWaitForever)==pdTRUE){
         	CommandType command = decodeCommand(ulNotifiedValue);
-        	printf("Motor (%d) received command of type: %d\r\n", context->id, command);
-        	fflush(stdout);
         	switch (command) {
-        		case CMD_STATUS: {
-        			printf(
-						"Motor (%d) Status: target=%ld, position=%ld, speed=%lu, enabled=%d, mode=%s\r\n",
-						context->id,
-						stepper->target,
-						stepper->position,
-						stepper->speed,
-						stepper->enabled,
-						stepper->mode == MODE_POS ? "position" : "speed"
-					);
-        			break;
-        		}
         		case CMD_STOP: {
         			stepper->speed = 0;
         			stepper->mode = MODE_SPEED;
         			stepper->enabled = 1;
+        			break;
         		}
         		case CMD_DISABLE: {
-        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
+        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, GPIO_PIN_RESET);
+        			break;
+        		}
+        		case CMD_MOVE_REL: {
+        			MotorController_HandlePosMove(
+        				context, stepper, ulNotifiedValue, command, true);
         			break;
         		}
         		case CMD_SET_SPEED:
-        		case CMD_MOVE_REL:
         		case CMD_MOVE_ABS: {
-        			stepper->target = decodeTarget(ulNotifiedValue);
-        			if (CMD_MOVE_REL) {
-        				stepper->target += stepper->position;
-        			}
-        			uint8_t speed = decodeSpeed(ulNotifiedValue);
-        			if(command == CMD_SET_SPEED && speed == 0)
-        				stepper->speed = 0;
-					else
-						stepper->speed = speed == 0 ? DEFAULT_SPEED : speed;
-        			stepper->mode = MODE_POS;
-        			stepper->enabled = 1;
-        			stepper->accumulator = 0;
-        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, 0);
-					HAL_GPIO_WritePin(
-							context->stepper->dir_port,
-							context->stepper->dir_pin,
-							context->stepper->target < context->stepper->position
-					);
+        			MotorController_HandlePosMove(
+        				context, stepper, ulNotifiedValue, command, false);
         			break;
         		}
         		default:
-        			printf("Motor (%d), recieved invalid command %lu.", context->id, ulNotifiedValue);
+        			break;
         	}
-//        	printf("Received Task Notification: (%ld)\r\n", ulNotifiedValue);
-//        	uint8_t enabled = ulNotifiedValue & MOTOR_CMD_RUN;
-//        	int32_t target = ulNotifiedValue >> 2;
-//        	uint8_t mode = (ulNotifiedValue>>1) & 1;
-//        	context->stepper->target = target * 16;
-//        	context->stepper->speed = DEFAULT_SPEED;
-//        	context->stepper->mode = mode;
-//        	context->stepper->enabled = enabled;
-//        	context->stepper->accumulator = 0;
-//			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, !enabled);
-//			HAL_GPIO_WritePin(
-//					context->stepper->dir_port,
-//					context->stepper->dir_pin,
-//					context->stepper->target < context->stepper->position
-//			);
-//
-//        	printf("New State: target: %ld, speed: %d, enabled: %d.\r\n", target, DEFAULT_SPEED, enabled);
         }
 	}
   /* USER CODE END StartTask2 */
@@ -965,6 +969,7 @@ void StartTask04(void *argument)
 	  Error_Handler();
 	}
 	MX_USB_DEVICE_Init();
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
 
 	/* Wait (up to ~3s) for the host to enumerate, then report any crash that
 	 * caused the previous reset. _write drops output until USB is configured. */
