@@ -18,7 +18,7 @@
 ../Core/Src/main.c:783:6:ReportPreviousReset	16	static
 ../Core/Src/main.c:820:6:StartTask1	72	static
 ../Core/Src/main.c:888:6:StartTask2	40	static
-../Core/Src/main.c:939:6:StartTask03	32	static
-../Core/Src/main.c:975:6:StartTask04	288	static
-../Core/Src/main.c:1050:6:HAL_TIM_PeriodElapsedCallback	24	static
-../Core/Src/main.c:1093:6:Error_Handler	4	static,ignoring_inline_asm
+../Core/Src/main.c:939:6:StartTask03	80	static
+../Core/Src/main.c:982:6:StartTask04	288	static
+../Core/Src/main.c:1057:6:HAL_TIM_PeriodElapsedCallback	24	static
+../Core/Src/main.c:1100:6:Error_Handler	4	static,ignoring_inline_asm

@@ -170,7 +170,7 @@ volatile uint32_t usb_rx_byte_count = 0;
 volatile uint32_t usb_rx_drop_count = 0;
 volatile uint32_t usb_command_lines = 0;
 
-uint32_t encoder_adc[NUM_ENCODERS];
+volatile uint16_t encoder_adc[NUM_ENCODERS];
 
 /* Crash/reset report carried across a reset via a no-init RAM section. */
 #define RESET_REPORT_MAGIC 0xB16B0CA5u
@@ -947,11 +947,18 @@ void StartTask03(void *argument)
 //	         usb_rx_byte_count,
 //	         usb_rx_drop_count,
 //	         usb_command_lines);
-	  printf("ADC: IN4=%lu IN5=%lu IN6=%lu IN7=%lu\r\n",
-	         encoder_adc[0],
-	         encoder_adc[1],
-	         encoder_adc[2],
-	         encoder_adc[3]);
+	  /* 12-bit ADC (0..4095) mapped to a 0..360 degree angle. Buffer must be
+	   * uint16_t to match the halfword DMA config in HAL_ADC_MspInit. */
+	  uint32_t deg_x10[NUM_ENCODERS];
+	  for (int i = 0; i < NUM_ENCODERS; i++)
+	  {
+	    deg_x10[i] = ((uint32_t)encoder_adc[i] * 3600U) / 4096U;
+	  }
+	  printf("ADC: IN4=%lu.%lu IN5=%lu.%lu IN6=%lu.%lu IN7=%lu.%lu\r\n",
+	         deg_x10[0] / 10U, deg_x10[0] % 10U,
+	         deg_x10[1] / 10U, deg_x10[1] % 10U,
+	         deg_x10[2] / 10U, deg_x10[2] % 10U,
+	         deg_x10[3] / 10U, deg_x10[3] % 10U);
 
 	  /* Minimum free stack ever seen, in words (x4 = bytes). A value near 0
 	   * means that task is about to overflow - bump its stack_size. */
@@ -960,7 +967,7 @@ void StartTask03(void *argument)
 	         (unsigned long)uxTaskGetStackHighWaterMark(NULL),
 	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle));
 
-	  osDelay(10000);
+	  osDelay(1000);
   }
   /* USER CODE END StartTask03 */
 }
