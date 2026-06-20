@@ -42,8 +42,8 @@ typedef struct {
 	volatile uint8_t mode;
 
 	volatile uint32_t accumulator;
-	volatile int16_t target;
-	volatile int16_t position;
+	volatile int32_t target;
+	volatile int32_t position;
 	volatile int16_t speed;
 	volatile uint8_t enabled;
 	volatile uint8_t step_high;
@@ -107,6 +107,16 @@ typedef struct {
 #define INF  0x7FFF
 #define NINF 0x8000
 
+#define CMD_TYPE_BITS 4
+#define CMD_SPEED_BITS 8
+#define CMD_DIR_BITS 1
+#define CMD_TARGET_BITS 16
+
+#define CMD_TYPE_MASK 0xF
+#define CMD_SPEED_MASK 0xFF
+#define CMD_DIR_MASK 0x1
+#define CMD_TARGET_MASK 0xFFFF
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -132,7 +142,7 @@ osThreadId_t motorControllerHandle;
 const osThreadAttr_t motorController_attributes = {
   .name = "motorController",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for logger */
 osThreadId_t loggerHandle;
@@ -146,7 +156,7 @@ osThreadId_t usbCommandHandle;
 const osThreadAttr_t usbCommand_attributes = {
   .name = "usbCommand",
   .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* USER CODE BEGIN PV */
 StepperMotor steppers[NUM_STEPPERS];
@@ -203,7 +213,6 @@ void MotorContexts_Init(void)
         .step_pin = GPIO_PIN_13,
         .dir_port = GPIOD,
         .dir_pin = GPIO_PIN_12,
-        .mode = MODE_POS,
         .position = 0,
         .target = 0,
         .speed = DEFAULT_SPEED,
@@ -330,20 +339,20 @@ void HandleUsbCommand(const char *line)
   * @retval uint32_t command.
   */
 uint32_t encodeCommand(int16_t target, uint8_t dir, uint8_t speed, CommandType cmd){
-	return (((((target << 1) + (dir & 0x1)) << 8) + speed) << 3) + cmd;
+	return (((((target << CMD_DIR_BITS) + (dir & CMD_DIR_MASK)) << CMD_SPEED_BITS) + speed) << CMD_TYPE_BITS) + cmd;
 }
 
 int16_t decodeSpeed(uint32_t input) {
-	int dir = (input >> 11) & 0x1 ? 1 : -1;
-	return (dir * -1) * ((input >> 3) & 0xFF);
+	int dir = (input >> (CMD_SPEED_BITS + CMD_TYPE_BITS)) & CMD_DIR_MASK ? 1 : -1;
+	return (dir * -1) * ((input >> CMD_TYPE_BITS) & CMD_SPEED_MASK);
 }
 
 CommandType decodeCommand(uint32_t input) {
-	return input & 0x7;
+	return input & CMD_TYPE_MASK;
 }
 
 int16_t decodeTarget(uint32_t input) {
-	return (input >> 12) & 0xFFFF;
+	return (input >> (CMD_DIR_BITS + CMD_SPEED_BITS + CMD_TYPE_BITS)) & CMD_TARGET_MASK;
 }
 
 static void MotorController_HandlePosMove(
@@ -358,17 +367,20 @@ static void MotorController_HandlePosMove(
 		target += stepper->position;
 	}
 	stepper->target = target;
+	if(command == CMD_SET_SPEED) {
+		stepper->target *= 0xFFFF;
+	}
 
 	uint8_t speed = decodeSpeed(ulNotifiedValue);
 	if (command == CMD_SET_SPEED && speed == 0) {
 		stepper->speed = 0;
+		stepper->target = stepper->position;
 	} else {
 		stepper->speed = speed == 0 ? DEFAULT_SPEED : abs(speed);
 	}
-	stepper->mode = MODE_POS;
 	stepper->enabled = 1;
 	stepper->accumulator = 0;
-	HAL_GPIO_WritePin(context->enable_port, context->enable_pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(context->enable_port, context->enable_pin, context->enable_active_state);
 	HAL_GPIO_WritePin(
 		stepper->dir_port,
 		stepper->dir_pin,
@@ -705,24 +717,24 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, E4_Dir_Pin|E4_Step_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(E4_Enable_GPIO_Port, E4_Enable_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pins : PD11 PD12 PD13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13;
+  /*Configure GPIO pins : E4_Dir_Pin E4_Step_Pin */
+  GPIO_InitStruct.Pin = E4_Dir_Pin|E4_Step_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB6 */
-  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  /*Configure GPIO pin : E4_Enable_Pin */
+  GPIO_InitStruct.Pin = E4_Enable_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(E4_Enable_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -840,7 +852,7 @@ void StartTask1(void *argument)
 			if (cmd.type == CMD_STATUS) {
 				StepperMotor *stepper = motorCtx[cmd.motor_id].stepper;
 				printf(
-					"Motor (%d) Status: target=%d, position=%d, speed=%d, enabled=%d, mode=%s\r\n",
+					"Motor (%d) Status: target=%ld, position=%ld, speed=%d, enabled=%d, mode=%s\r\n",
 					cmd.motor_id,
 					stepper->target,
 					stepper->position,
@@ -852,7 +864,7 @@ void StartTask1(void *argument)
 			}
 
        printf("Setting Stepper target: %ld, speed: %lu\r\n", cmd.target, cmd.speed);
-			uint32_t notifyValue = encodeCommand(cmd.target, 0, cmd.speed, cmd.type);
+			uint32_t notifyValue = encodeCommand(cmd.target, cmd.speed < 0, abs(cmd.speed), cmd.type);
 
 			BaseType_t result = xTaskNotify(
 				motorTaskHandles[cmd.motor_id],
@@ -890,10 +902,12 @@ void StartTask2(void *argument)
         			stepper->speed = 0;
         			stepper->mode = MODE_SPEED;
         			stepper->enabled = 1;
+        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, context->enable_active_state);
         			break;
         		}
         		case CMD_DISABLE: {
-        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, GPIO_PIN_RESET);
+        			printf("Recieved Disable Command, setting pin to: %d", !context->enable_active_state);
+        			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, !context->enable_active_state);
         			break;
         		}
         		case CMD_MOVE_REL: {
@@ -1048,26 +1062,24 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			if (!steppers[i].enabled) {
 				continue;
 			}
-			if(steppers[i].mode==MODE_POS) {
-				if (steppers[i].target==steppers[i].position) {
-					steppers[i].enabled = 0;
-					continue;
-				}
-				if (steppers[i].step_high) {
-					steppers[i].step_port->BSRR = (uint32_t)steppers[i].step_pin << 16; // STEP low
-					steppers[i].step_high = 0;
-					continue;
-				}
-				steppers[i].accumulator += steppers[i].speed;
-				if (steppers[i].accumulator > MAX_SPEED) {
-					steppers[i].accumulator -= MAX_SPEED;
-					steppers[i].step_port->BSRR = steppers[i].step_pin; // STEP high
-					steppers[i].step_high = 1;
-					if (steppers[i].position < steppers[i].target)
-						steppers[i].position++;
-					else
-						steppers[i].position--;
-				}
+			if (steppers[i].target==steppers[i].position) {
+				steppers[i].enabled = 0;
+				continue;
+			}
+			if (steppers[i].step_high) {
+				steppers[i].step_port->BSRR = (uint32_t)steppers[i].step_pin << 16; // STEP low
+				steppers[i].step_high = 0;
+				continue;
+			}
+			steppers[i].accumulator += steppers[i].speed;
+			if (steppers[i].accumulator > MAX_SPEED) {
+				steppers[i].accumulator -= MAX_SPEED;
+				steppers[i].step_port->BSRR = steppers[i].step_pin; // STEP high
+				steppers[i].step_high = 1;
+				if (steppers[i].position < steppers[i].target)
+					steppers[i].position++;
+				else
+					steppers[i].position--;
 			}
 		}
 	}

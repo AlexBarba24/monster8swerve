@@ -60,6 +60,12 @@ void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define E4_Dir_Pin GPIO_PIN_12
+#define E4_Dir_GPIO_Port GPIOD
+#define E4_Step_Pin GPIO_PIN_13
+#define E4_Step_GPIO_Port GPIOD
+#define E4_Enable_Pin GPIO_PIN_6
+#define E4_Enable_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
