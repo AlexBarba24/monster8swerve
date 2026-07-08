@@ -92,7 +92,7 @@ typedef struct {
 #define MODE_POS 1
 #define DEFAULT_SPEED 80
 
-#define NUM_STEPPERS 1
+#define NUM_STEPPERS 8
 #define MAX_SPEED 250
 
 #define USE_USB_COMMANDS 1
@@ -208,27 +208,219 @@ void StartTask04(void *argument);
  */
 void MotorContexts_Init(void)
 {
+	// Front Left Drive
     steppers[0] = (StepperMotor) {
-        .step_port = GPIOD,
-        .step_pin = GPIO_PIN_13,
-        .dir_port = GPIOD,
-        .dir_pin = GPIO_PIN_12,
+        .step_port = GPIOC,
+        .step_pin = GPIO_PIN_14,
+        .dir_port = GPIOC,
+        .dir_pin = GPIO_PIN_13,
+        .mode = MODE_POS,
         .position = 0,
         .target = 0,
         .speed = DEFAULT_SPEED,
         .enabled = 0,
         .step_high = 0
     };
-
     motorCtx[0] = (MotorControllerContext) {
         .id = 0,
         .stepper = &steppers[0],
-        .enable_port = GPIOB,
-        .enable_pin = GPIO_PIN_6,
+        .enable_port = GPIOC,
+        .enable_pin = GPIO_PIN_15,
         .enable_active_state = GPIO_PIN_RESET,
     };
+    // Front Left Steer
+	steppers[1] = (StepperMotor) {
+		.step_port = GPIOE,
+		.step_pin = GPIO_PIN_5,
+		.dir_port = GPIOE,
+		.dir_pin = GPIO_PIN_4,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[1] = (MotorControllerContext) {
+		.id = 1,
+		.stepper = &steppers[1],
+		.enable_port = GPIOC,
+		.enable_pin = GPIO_PIN_15,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Front Right Drive
+	steppers[2] = (StepperMotor) {
+		.step_port = GPIOE,
+		.step_pin = GPIO_PIN_1,
+		.dir_port = GPIOE,
+		.dir_pin = GPIO_PIN_0,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[2] = (MotorControllerContext) {
+		.id = 2,
+		.stepper = &steppers[2],
+		.enable_port = GPIOE,
+		.enable_pin = GPIO_PIN_2,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Front Right Steer
+	steppers[3] = (StepperMotor) {
+		.step_port = GPIOB,
+		.step_pin = GPIO_PIN_5,
+		.dir_port = GPIOB,
+		.dir_pin = GPIO_PIN_4,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[3] = (MotorControllerContext) {
+		.id = 3,
+		.stepper = &steppers[3],
+		.enable_port = GPIOB,
+		.enable_pin = GPIO_PIN_6,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Back Left Drive
+	steppers[4] = (StepperMotor) {
+		.step_port = GPIOD,
+		.step_pin = GPIO_PIN_6,
+		.dir_port = GPIOD,
+		.dir_pin = GPIO_PIN_5,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[4] = (MotorControllerContext) {
+		.id = 4,
+		.stepper = &steppers[4],
+		.enable_port = GPIOD,
+		.enable_pin = GPIO_PIN_7,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Back Left Steer
+	steppers[5] = (StepperMotor) {
+		.step_port = GPIOD,
+		.step_pin = GPIO_PIN_2,
+		.dir_port = GPIOD,
+		.dir_pin = GPIO_PIN_1,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[5] = (MotorControllerContext) {
+		.id = 5,
+		.stepper = &steppers[5],
+		.enable_port = GPIOD,
+		.enable_pin = GPIO_PIN_3,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Back Right Drive
+	steppers[6] = (StepperMotor) {
+		.step_port = GPIOC,
+		.step_pin = GPIO_PIN_7,
+		.dir_port = GPIOC,
+		.dir_pin = GPIO_PIN_6,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[6] = (MotorControllerContext) {
+		.id = 6,
+		.stepper = &steppers[6],
+		.enable_port = GPIOC,
+		.enable_pin = GPIO_PIN_8,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+	// Back Right Steer
+	steppers[7] = (StepperMotor) {
+		.step_port = GPIOD,
+		.step_pin = GPIO_PIN_13,
+		.dir_port = GPIOD,
+		.dir_pin = GPIO_PIN_12,
+		.mode = MODE_POS,
+		.position = 0,
+		.target = 0,
+		.speed = DEFAULT_SPEED,
+		.enabled = 0,
+		.step_high = 0
+	};
+	motorCtx[7] = (MotorControllerContext) {
+		.id = 7,
+		.stepper = &steppers[7],
+		.enable_port = GPIOB,
+		.enable_pin = GPIO_PIN_6,
+		.enable_active_state = GPIO_PIN_RESET,
+	};
+}
 
-    // Repeat for steppers[1], steppers[2], etc.
+static uint8_t tmc_sw_spi_transfer(uint8_t data_out)
+{
+    uint8_t data_in = 0;
+
+    for (int i = 7; i >= 0; i--) {
+        // SCLK idle high. First pull low, set MOSI while low.
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_RESET);
+
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14,
+            (data_out & (1 << i)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+        // Short delay may be needed if running very fast.
+        __NOP(); __NOP(); __NOP();
+
+        // Rising edge: TMC samples MOSI; MCU samples MISO.
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
+
+        __NOP(); __NOP(); __NOP();
+
+        if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_13)) {
+            data_in |= (1 << i);
+        }
+    }
+
+    return data_in;
+}
+
+void tmc5160_write(GPIO_TypeDef *cs_port, uint16_t cs_pin,
+                   uint8_t reg, uint32_t value)
+{
+    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
+
+    tmc_sw_spi_transfer(reg | 0x80);        // write command
+    tmc_sw_spi_transfer(value >> 24);
+    tmc_sw_spi_transfer(value >> 16);
+    tmc_sw_spi_transfer(value >> 8);
+    tmc_sw_spi_transfer(value);
+
+    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+}
+
+void ConfigureSPIControllers() {
+	// TODO: Dynamic Configuration
+	GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
+	uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
+	for (uint8_t i = 0; i < spiControllers.size(); i++){
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x6C, 0x000100C3); // CHOPCONF
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x10, 0x00061F0A); // IHOLD_IRUN
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x11, 0x0000000A); // TPOWERDOWN
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x00, 0x00000000); // GCONF
+	}
 }
 
 void HandleUsbCommand(const char *line)
@@ -410,17 +602,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-	steppers[0] = (StepperMotor) {
-		.step_port = GPIOD,
-		.step_pin = GPIO_PIN_13,
-		.dir_port = GPIOD,
-		.dir_pin = GPIO_PIN_12,
-		.mode = MODE_POS,
-		.position = 0,
-		.step_high=0,
-		.speed=DEFAULT_SPEED,
-		.enabled = 0
-	};
+
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -711,30 +893,98 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, E4_Dir_Pin|E4_Step_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(Z_Enable_GPIO_Port, Z_Enable_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(E4_Enable_GPIO_Port, E4_Enable_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3|Y_Dir_Pin|Y_Step_Pin|GPIO_PIN_6
+                          |Z_Dir_Pin|Z_Step_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : E4_Dir_Pin E4_Step_Pin */
-  GPIO_InitStruct.Pin = E4_Dir_Pin|E4_Step_Pin;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, X_Dir_Pin|X_Step_Pin|E3_Dir_Pin|E3_Step_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, XY_Enable_Pin|E3_Enable_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, E4_Dir_Pin|E4_Step_Pin|GPIO_PIN_15|E2_Dir_Pin
+                          |E2_Step_Pin|GPIO_PIN_4|E1_Dir_Pin|E1_Step_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, E2_Enable_Pin|E1_Enable_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, E0_Dir_Pin|E0_Step_Pin|GPIO_PIN_7, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(E04_Enable_GPIO_Port, E04_Enable_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : Z_Enable_Pin */
+  GPIO_InitStruct.Pin = Z_Enable_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(Z_Enable_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PE3 Y_Dir_Pin Y_Step_Pin PE6
+                           Z_Dir_Pin Z_Step_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_3|Y_Dir_Pin|Y_Step_Pin|GPIO_PIN_6
+                          |Z_Dir_Pin|Z_Step_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : X_Dir_Pin X_Step_Pin E3_Dir_Pin E3_Step_Pin */
+  GPIO_InitStruct.Pin = X_Dir_Pin|X_Step_Pin|E3_Dir_Pin|E3_Step_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : XY_Enable_Pin E3_Enable_Pin */
+  GPIO_InitStruct.Pin = XY_Enable_Pin|E3_Enable_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : E4_Dir_Pin E4_Step_Pin PD15 E2_Dir_Pin
+                           E2_Step_Pin PD4 E1_Dir_Pin E1_Step_Pin */
+  GPIO_InitStruct.Pin = E4_Dir_Pin|E4_Step_Pin|GPIO_PIN_15|E2_Dir_Pin
+                          |E2_Step_Pin|GPIO_PIN_4|E1_Dir_Pin|E1_Step_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : E4_Enable_Pin */
-  GPIO_InitStruct.Pin = E4_Enable_Pin;
+  /*Configure GPIO pins : E2_Enable_Pin E1_Enable_Pin */
+  GPIO_InitStruct.Pin = E2_Enable_Pin|E1_Enable_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(E4_Enable_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : E0_Dir_Pin E0_Step_Pin PB7 */
+  GPIO_InitStruct.Pin = E0_Dir_Pin|E0_Step_Pin|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : E04_Enable_Pin */
+  GPIO_InitStruct.Pin = E04_Enable_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(E04_Enable_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
