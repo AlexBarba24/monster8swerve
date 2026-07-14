@@ -411,104 +411,15 @@ void tmc5160_write(GPIO_TypeDef *cs_port, uint16_t cs_pin,
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
 }
 
-/*
- * Read a TMC5160 register. Reads are pipelined: the first datagram latches the
- * address, and the *second* datagram returns its contents. We always issue two
- * frames so the value is valid on a cold read. The first byte clocked back on
- * any frame is the SPI status byte (returned via status_out).
- */
-uint32_t tmc5160_read(GPIO_TypeDef *cs_port, uint16_t cs_pin,
-                      uint8_t reg, uint8_t *status_out)
-{
-    uint8_t addr = reg & 0x7F;   // read access: MSB clear
-
-    // Frame 1: latch the address (returned data is stale, discard it).
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
-    tmc_sw_spi_transfer(addr);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
-
-    // Frame 2: same address, now the value comes back.
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
-    uint8_t status = tmc_sw_spi_transfer(addr);
-    uint32_t value = 0;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 24;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 16;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 8;
-    value |= (uint32_t)tmc_sw_spi_transfer(0);
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
-
-    if (status_out != NULL) {
-        *status_out = status;
-    }
-    return value;
-}
-
-/*
- * Read back a few key registers from every TMC5160 so we can tell whether SPI
- * comms are actually working. On a healthy chip IOIN[31:24] (VERSION) reads
- * 0x30; a value of 0x00 or 0xFF means the SPI link (MISO/CS/wiring) is dead.
- */
-void DiagnoseSPIControllers(void)
-{
-    GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
-    uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-    const char *names[5] = {"X/s0", "Y/s1", "Z/s2", "E1/s4", "E3/s6"};
-
-    for (uint8_t i = 0; i < 5; i++) {
-        uint8_t st = 0;
-        // Clear GSTAT *now* (USB is up, so VS has had seconds to stabilise),
-        // then read it back. Any flag still set here is a live condition, not a
-        // stale latch left over from the power-up ramp.
-        tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007);
-
-        uint32_t ioin  = tmc5160_read(cs_ports[i], cs_pins[i], 0x04, &st);
-        uint32_t gconf = tmc5160_read(cs_ports[i], cs_pins[i], 0x00, NULL);
-        uint32_t gstat = tmc5160_read(cs_ports[i], cs_pins[i], 0x01, NULL);
-        uint32_t chop  = tmc5160_read(cs_ports[i], cs_pins[i], 0x6C, NULL);
-        uint32_t drv   = tmc5160_read(cs_ports[i], cs_pins[i], 0x6F, NULL);
-        printf("TMC %-5s VERSION=0x%02lX status=0x%02X GCONF=0x%08lX "
-               "GSTAT=0x%lX CHOPCONF=0x%08lX DRV_STATUS=0x%08lX\r\n",
-               names[i], (ioin >> 24) & 0xFF, st,
-               gconf, gstat, chop, drv);
-    }
-}
-
 void ConfigureSPIControllers() {
 	// TODO: Dynamic Configuration
 	GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
 	uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-
-	// Put the shared SPI bus in its idle state before talking to any driver:
-	// SCLK high (mode 3 idle) and every CS de-asserted. This matters because at
-	// boot E3_CS (PD15) is driven low by MX_GPIO_Init, which would leave that
-	// chip selected and latching every byte meant for the other drivers.
-	HAL_GPIO_WritePin(SCLK_GPIO_Port, SCLK_Pin, GPIO_PIN_SET);
 	for (uint8_t i = 0; i < 5; i++){
-		HAL_GPIO_WritePin(cs_ports[i], cs_pins[i], GPIO_PIN_SET);
-	}
-
-	for (uint8_t i = 0; i < 5; i++){
-		// CHOPCONF: MRES=16 microsteps (bits 27:24 = 0x4) plus intpol (bit 28)
-		// so the driver interpolates 16 usteps up to 256 internally -> smoother
-		// and much quieter than plain 16-ustep spreadCycle.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x6C, 0x140100C3); // CHOPCONF (MRES=16, intpol)
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x6C, 0x000100C3); // CHOPCONF
 		tmc5160_write(cs_ports[i], cs_pins[i], 0x10, 0x00061F0A); // IHOLD_IRUN
 		tmc5160_write(cs_ports[i], cs_pins[i], 0x11, 0x0000000A); // TPOWERDOWN
-		// PWMCONF: reset-default value with pwm_autoscale + pwm_autograd enabled,
-		// required for stealthChop to self-tune. Must be set before en_pwm_mode.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x70, 0xC40C001E); // PWMCONF
-		// GCONF: en_pwm_mode (bit 2) enables stealthChop -> near-silent chopper.
-		// With TPWMTHRS at its reset default (0) stealthChop stays active at all
-		// speeds. If you later need more high-speed torque, raise TPWMTHRS so the
-		// driver hands off to spreadCycle above that velocity.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x00, 0x00000004); // GCONF (stealthChop)
-		// Clear the latched GSTAT flags (reset / drv_err / uv_cp) by writing 1s.
-		// After this, any flag that reads back set is a *live* condition.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007); // GSTAT
+		tmc5160_write(cs_ports[i], cs_pins[i], 0x00, 0x00000000); // GCONF
 	}
 }
 
@@ -710,13 +621,6 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim2);
 
   MotorContexts_Init();
-
-  /* Configure the TMC5160 drivers over SPI. Unlike the TMC2208s (which run
-   * standalone from their pin/OTP defaults), the TMC5160 powers up with
-   * CHOPCONF.TOFF = 0, i.e. the output stage disabled, so it ignores STEP/DIR
-   * until we set the chopper + run current here. */
-  ConfigureSPIControllers();
-
   HAL_StatusTypeDef adc_status =
       HAL_ADC_Start_DMA(&hadc1, (uint32_t *)encoder_adc, NUM_ENCODERS);
 
@@ -1322,44 +1226,6 @@ void StartTask03(void *argument)
 	         (unsigned long)uxTaskGetStackHighWaterMark(NULL),
 	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle));
 
-	  /* Live TMC5160 microstep counter. MSCNT (0x6A) advances only when the
-	   * driver actually receives STEP pulses, so if you command a move and the
-	   * matching slot's value changes, STEP/DIR is reaching the driver; if it
-	   * stays frozen, the pulses are not getting there (pin/enable/step-gen). */
-	  {
-	    GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
-	    uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-	    printf("MSCNT X=%lu Y=%lu Z=%lu E1=%lu E3=%lu\r\n",
-	           tmc5160_read(cs_ports[0], cs_pins[0], 0x6A, NULL) & 0x3FF,
-	           tmc5160_read(cs_ports[1], cs_pins[1], 0x6A, NULL) & 0x3FF,
-	           tmc5160_read(cs_ports[2], cs_pins[2], 0x6A, NULL) & 0x3FF,
-	           tmc5160_read(cs_ports[3], cs_pins[3], 0x6A, NULL) & 0x3FF,
-	           tmc5160_read(cs_ports[4], cs_pins[4], 0x6A, NULL) & 0x3FF);
-
-	    /* Decode the Y driver's DRV_STATUS (0x6F) so we can see what the driver
-	     * itself thinks is happening while it is being stepped:
-	     *   CS_ACTUAL  = actual current scale (should climb to IRUN=31 while
-	     *                moving; if it stays low, run current is not applied)
-	     *   ola/olb    = open load on coil A/B (broken/disconnected phase)
-	     *   s2ga/s2gb/s2vsa/s2vsb = short to GND / supply on a coil
-	     *   ot/otpw    = over-temp (shutdown / pre-warning)
-	     *   stst       = standstill (no steps recently) */
-	    uint32_t drv = tmc5160_read(cs_ports[1], cs_pins[1], 0x6F, NULL);
-	    printf("Y DRV_STATUS=0x%08lX cs_actual=%lu stst=%lu ola=%lu olb=%lu "
-	           "s2ga=%lu s2gb=%lu s2vsa=%lu s2vsb=%lu ot=%lu otpw=%lu\r\n",
-	           drv,
-	           (drv >> 16) & 0x1F,
-	           (drv >> 31) & 0x1,
-	           (drv >> 29) & 0x1,
-	           (drv >> 30) & 0x1,
-	           (drv >> 27) & 0x1,
-	           (drv >> 28) & 0x1,
-	           (drv >> 12) & 0x1,
-	           (drv >> 13) & 0x1,
-	           (drv >> 25) & 0x1,
-	           (drv >> 26) & 0x1);
-	  }
-
 	  osDelay(1000);
   }
   /* USER CODE END StartTask03 */
@@ -1395,9 +1261,6 @@ void StartTask04(void *argument)
 	}
 	osDelay(200);
 	ReportPreviousReset();
-
-	/* Dump each TMC5160's identity/status now that USB can carry the output. */
-	DiagnoseSPIControllers();
 
 	char line[USB_LINE_MAX];
 	size_t line_len = 0;
