@@ -82,8 +82,6 @@ void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 #define MISO_GPIO_Port GPIOE
 #define MOSI_Pin GPIO_PIN_14
 #define MOSI_GPIO_Port GPIOE
-#define E4_CS_Pin GPIO_PIN_11
-#define E4_CS_GPIO_Port GPIOD
 #define E4_Dir_Pin GPIO_PIN_12
 #define E4_Dir_GPIO_Port GPIOD
 #define E4_Step_Pin GPIO_PIN_13
@@ -96,8 +94,6 @@ void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 #define E3_Step_GPIO_Port GPIOC
 #define E3_Enable_Pin GPIO_PIN_8
 #define E3_Enable_GPIO_Port GPIOC
-#define E2_CS_Pin GPIO_PIN_0
-#define E2_CS_GPIO_Port GPIOD
 #define E2_Dir_Pin GPIO_PIN_1
 #define E2_Dir_GPIO_Port GPIOD
 #define E2_Step_Pin GPIO_PIN_2
@@ -112,8 +108,6 @@ void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 #define E1_Step_GPIO_Port GPIOD
 #define E1_Enable_Pin GPIO_PIN_7
 #define E1_Enable_GPIO_Port GPIOD
-#define E0_CS_Pin GPIO_PIN_3
-#define E0_CS_GPIO_Port GPIOB
 #define E0_Dir_Pin GPIO_PIN_4
 #define E0_Dir_GPIO_Port GPIOB
 #define E0_Step_Pin GPIO_PIN_5

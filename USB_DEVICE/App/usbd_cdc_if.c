@@ -32,10 +32,10 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-extern uint32_t usb_rx_callback_count;
-extern uint32_t usb_rx_byte_count;
-extern uint32_t usb_rx_drop_count;
-extern uint32_t usb_command_lines;
+extern volatile uint32_t usb_rx_callback_count;
+extern volatile uint32_t usb_rx_byte_count;
+extern volatile uint32_t usb_rx_drop_count;
+extern volatile uint32_t usb_command_lines;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -267,14 +267,28 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
   /* USER CODE BEGIN 6 */
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
+	    usb_rx_callback_count++;
+
 	    if (usbRxStream != NULL && *Len > 0)
 	    {
-	        xStreamBufferSendFromISR(
+	        /* The OUT endpoint is re-armed unconditionally below, so the host is
+	         * never NAK'd and anything that does not fit here is simply gone.
+	         * Account for it: a shortfall corrupts the command line in flight,
+	         * so this counter is the first thing to check when commands appear
+	         * to go missing. */
+	        size_t accepted = xStreamBufferSendFromISR(
 	            usbRxStream,
 	            Buf,
 	            *Len,
 	            &xHigherPriorityTaskWoken
 	        );
+
+	        usb_rx_byte_count += accepted;
+
+	        if (accepted < *Len)
+	        {
+	            usb_rx_drop_count += (*Len - accepted);
+	        }
 	    }
 
 	    USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);

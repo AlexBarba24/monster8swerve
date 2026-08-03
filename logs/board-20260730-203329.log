@@ -1,0 +1,23 @@
+# 2026-07-30 20:33:29 log opened: /home/swervepi/swerveDriver/logs/board-20260730-203329.log
+# 2026-07-30 20:33:29 serial opened /dev/ttyACM0 @ 115200 baud
+20:33:29.577 > STATUS 1
+20:33:30.577 > STATUS 3
+20:33:31.578 > STATUS 5
+20:33:31.724 < MSCNT X=904 Y=616 Z=536 E1=328 E3=840
+20:33:32.578 > STATUS 7
+20:33:32.684 < Y DRV_STATUS=0x80050045 cs_actual=5 stst=1 ola=0 olb=0 s2ga=0 s2gb=0 s2vsa=0 s2vsb=0 ot=0 otpw=0
+20:33:32.692 < Invalid Command Received.
+20:33:32.706 < Motor (3) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:33:32.719 < Motor (5) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:33:32.731 < Motor (7) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:33:32.774 < RX cb=20 bytes=52 rx_drop=0 lines=4 invalid=1
+20:33:32.807 < CMD qdrop=0 qpeak=0/16 notify_sent=0 recv=0 coalesced=0
+20:33:32.841 < ADC: IN4=355.6 IN5=164.7 IN6=356.1 IN7=356.3
+20:33:33.145 < Stack free words: motor0=218 logger=310 usb=642
+20:33:33.936 > STOP 0 2 4 6
+20:33:34.058 > STOP 0 2 4 6
+20:33:34.180 > STOP 0 2 4 6
+20:33:37.720 < MSCNT X=904 Y=616 Z=536 E1=328 E3=840
+20:33:37.809 > STOP 0 1 2 3 4 5 6 7
+# 2026-07-30 20:33:37 serial closed
+# 2026-07-30 20:33:37 log closed

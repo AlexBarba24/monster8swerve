@@ -1,0 +1,34 @@
+# 2026-07-30 20:33:58 log opened: /home/swervepi/swerveDriver/logs/board-20260730-203358.log
+# 2026-07-30 20:33:58 serial opened /dev/ttyACM0 @ 115200 baud
+20:33:58.844 < RX cb=24 bytes=112 rx_drop=0 lines=8 invalid=1
+20:33:58.845 < CMD qdrop=0 qpeak=0/16 notify_sent=20 recv=20 coalesced=0
+20:33:58.845 < ADC: IN4=352.8 IN5=164.7 IN6=359.7 IN7=357.1
+20:33:58.845 < Stack free words: motor0=218 logger=310 usb=642
+20:33:58.845 > STATUS 1
+20:33:59.846 > STATUS 3
+20:34:00.847 > STATUS 5
+20:34:01.657 < MSCNT X=904 Y=616 Z=536 E1=328 E3=840
+20:34:01.847 > STATUS 7
+20:34:02.618 < Y DRV_STATUS=0x8005004B cs_actual=5 stst=1 ola=0 olb=0 s2ga=0 s2gb=0 s2vsa=0 s2vsb=0 ot=0 otpw=0
+20:34:02.630 < Motor (1) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=speed
+20:34:02.641 < Motor (3) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=speed
+20:34:02.653 < Motor (5) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=speed
+20:34:02.666 < Motor (7) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=speed
+20:34:02.711 < RX cb=28 bytes=148 rx_drop=0 lines=12 invalid=1
+20:34:02.743 < CMD qdrop=0 qpeak=0/16 notify_sent=20 recv=20 coalesced=0
+20:34:02.780 < ADC: IN4=354.7 IN5=164.0 IN6=357.8 IN7=356.6
+20:34:03.188 < Stack free words: motor0=218 logger=310 usb=642
+20:34:03.216 > STOP 0 2 4 6
+20:34:03.337 > STOP 0 2 4 6
+20:34:03.459 > STOP 0 2 4 6
+20:34:07.661 < MSCNT X=904 Y=616 Z=536 E1=328 E3=840
+20:34:08.566 < Y DRV_STATUS=0x80050043 cs_actual=5 stst=1 ola=0 olb=0 s2ga=0 s2gb=0 s2vsa=0 s2vsb=0 ot=0 otpw=0
+20:34:08.573 < STOP BATCH DONE queued=4 failed=0
+20:34:08.582 < STOP BATCH DONE queued=4 failed=0
+20:34:08.591 < STOP BATCH DONE queued=4 failed=0
+20:34:08.634 < RX cb=31 bytes=187 rx_drop=0 lines=15 invalid=1
+20:34:08.666 < CMD qdrop=0 qpeak=0/16 notify_sent=32 recv=32 coalesced=0
+20:34:08.705 < ADC: IN4=355.8 IN5=165.7 IN6=355.9 IN7=353.9
+# 2026-07-30 20:34:08 read failed: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+# 2026-07-30 20:34:23 serial closed
+# 2026-07-30 20:34:23 log closed

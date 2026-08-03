@@ -26,6 +26,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
 #include "FreeRTOS.h"
 #include "stream_buffer.h"
 /* USER CODE END Includes */
@@ -45,6 +47,8 @@ typedef struct {
 	volatile int32_t target;
 	volatile int32_t position;
 	volatile int16_t speed;
+	volatile int16_t commanded_speed;
+	volatile uint32_t ramp_accumulator;
 	volatile uint8_t enabled;
 	volatile uint8_t step_high;
 } StepperMotor;
@@ -95,11 +99,26 @@ typedef struct {
 #define NUM_STEPPERS 8
 #define MAX_SPEED 250
 
+// Speed ramp profile for MODE_SPEED moves (position moves are unaffected and
+// snap straight to their commanded speed). Each TIM2 tick, ramp_accumulator
+// increments by 1; once it reaches RAMP_ACCUMULATOR_THRESHOLD it resets to 0
+// and stepper->speed is nudged by SPEED_RAMP_STEP toward commanded_speed. So
+// the ramp takes RAMP_ACCUMULATOR_THRESHOLD ticks per SPEED_RAMP_STEP units of
+// speed change - raise the threshold for a gentler ramp, lower it (or raise
+// the step) for a snappier one.
+#define SPEED_RAMP_STEP 1
+#define RAMP_ACCUMULATOR_THRESHOLD 50
+
 #define USE_USB_COMMANDS 1
 #define USE_CAN_COMMANDS 0
 
 #define USB_LINE_MAX 256
-#define USB_RX_STREAM_SIZE 256
+/* The CDC OUT endpoint is re-armed unconditionally in CDC_Receive_FS, so this
+ * buffer is the only thing absorbing a host burst - there is no NAK
+ * backpressure. At 64 bytes per packet and one packet per 1ms frame, 256 bytes
+ * was barely four packets, and an overrun corrupts a line mid-flight rather
+ * than losing a whole command cleanly. */
+#define USB_RX_STREAM_SIZE 1024
 #define USB_TX_STREAM_SIZE 256
 
 #define NUM_ENCODERS 4
@@ -116,6 +135,35 @@ typedef struct {
 #define CMD_SPEED_MASK 0xFF
 #define CMD_DIR_MASK 0x1
 #define CMD_TARGET_MASK 0xFFFF
+
+/* Deferred logging. A USB CDC write costs ~1ms (bulk IN transfers are scheduled
+ * on 1ms frame boundaries) and _write busy-waits up to 50ms when the endpoint is
+ * still busy, so printf() anywhere between "byte arrived" and "stepper struct
+ * updated" dominates command latency. Hot-path code instead formats into a
+ * fixed-size record and hands it to logQueue; the logger task does the slow
+ * write. Records are dropped rather than waited on when the queue is full, so a
+ * slow or absent host can never stall motion. */
+#define LOG_MSG_MAX 160
+#define LOG_QUEUE_DEPTH 32
+#define DIAG_INTERVAL_MS 1000
+
+/* Per-command trace ("Parsing Command", "OK QUEUED ..."). An 8-motor batch
+ * emits 10 such lines and each one is a separate ~1ms USB write, so above a few
+ * command lines per second the log queue overflows. Dropped log records look
+ * exactly like dropped commands from the host's point of view, which is why
+ * this is off by default; errors, batch summaries and the periodic counters
+ * below are always logged and are the reliable signal. */
+#define CMD_LOG_VERBOSE 0
+
+#if CMD_LOG_VERBOSE
+#define LogTrace(...) LogDeferred(__VA_ARGS__)
+#else
+#define LogTrace(...) ((void)0)
+#endif
+
+/* Echo received command lines back to the host. Off by default: it is purely an
+ * interactive-terminal convenience and costs a USB transaction per line. */
+#define USB_ECHO_ENABLED 0
 
 /* USER CODE END PD */
 
@@ -147,9 +195,21 @@ const osThreadAttr_t motorController_attributes = {
 /* Definitions for logger */
 osThreadId_t loggerHandle;
 const osThreadAttr_t logger_attributes = {
+  /* Stack raised from 256 words: this task now also holds a LOG_MSG_MAX drain
+   * buffer on top of newlib's vfprintf frame. */
   .name = "logger",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for outputWriter */
+osThreadId_t outputWriterHandle;
+const osThreadAttr_t outputWriter_attributes = {
+  /* The only task permitted to write to stdout. It sits above the logger so
+   * that a command acknowledgement preempts the logger's multi-second TMC5160
+   * register reads, and below usbCommand so it can never delay parsing. */
+  .name = "outputWriter",
+  .stack_size = 384 * 4,
+  .priority = (osPriority_t) osPriorityLow7,
 };
 /* Definitions for usbCommand */
 osThreadId_t usbCommandHandle;
@@ -165,10 +225,23 @@ osThreadId_t motorTaskHandles[NUM_STEPPERS];
 StreamBufferHandle_t usbRxStream;
 StreamBufferHandle_t usbTxStream;
 osMessageQueueId_t schedulerCommandQueue;
+osMessageQueueId_t logQueue;
 volatile uint32_t usb_rx_callback_count = 0;
 volatile uint32_t usb_rx_byte_count = 0;
 volatile uint32_t usb_rx_drop_count = 0;
 volatile uint32_t usb_command_lines = 0;
+volatile uint32_t log_drop_count = 0;
+volatile uint32_t cmd_invalid_count = 0;
+volatile uint32_t cmd_queue_drop_count = 0;
+volatile uint32_t cmd_queue_peak = 0;
+
+/* Notifications handed to each motor task vs. notifications it actually woke up
+ * for. xTaskNotify uses eSetValueWithOverwrite, so a second command arriving
+ * before the motor task runs silently replaces the first; a persistent gap
+ * between these two totals is that coalescing, and it is invisible otherwise.
+ * Each slot has exactly one writer, so no atomics are needed. */
+volatile uint32_t notify_sent[NUM_STEPPERS];
+volatile uint32_t notify_recv[NUM_STEPPERS];
 
 volatile uint16_t encoder_adc[NUM_ENCODERS];
 
@@ -194,9 +267,15 @@ void StartTask1(void *argument);
 void StartTask2(void *argument);
 void StartTask03(void *argument);
 void StartTask04(void *argument);
+void StartTask05(void *argument);
 
 /* USER CODE BEGIN PFP */
-
+extern bool ConfigureSPIControllers(void);
+uint32_t tmc5160_read(
+    GPIO_TypeDef *cs_port,
+    uint16_t cs_pin,
+    uint8_t reg,
+    uint8_t *status_out);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -217,7 +296,7 @@ void MotorContexts_Init(void)
         .mode = MODE_POS,
         .position = 0,
         .target = 0,
-        .speed = DEFAULT_SPEED,
+        .speed = 0,
         .enabled = 0,
         .step_high = 0
     };
@@ -237,7 +316,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -257,7 +336,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -277,7 +356,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -297,7 +376,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -317,7 +396,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -337,7 +416,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -357,7 +436,7 @@ void MotorContexts_Init(void)
 		.mode = MODE_POS,
 		.position = 0,
 		.target = 0,
-		.speed = DEFAULT_SPEED,
+		.speed = 0,
 		.enabled = 0,
 		.step_high = 0
 	};
@@ -370,146 +449,199 @@ void MotorContexts_Init(void)
 	};
 }
 
-static uint8_t tmc_sw_spi_transfer(uint8_t data_out)
+//static uint8_t tmc_sw_spi_transfer(uint8_t data_out)
+//{
+//    uint8_t data_in = 0;
+//
+//    for (int i = 7; i >= 0; i--) {
+//        // SCLK idle high. First pull low, set MOSI while low.
+//        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_RESET);
+//
+//        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14,
+//            (data_out & (1 << i)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+//
+//        // Short delay may be needed if running very fast.
+//        __NOP(); __NOP(); __NOP();
+//
+//        // Rising edge: TMC samples MOSI; MCU samples MISO.
+//        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
+//
+//        __NOP(); __NOP(); __NOP();
+//
+//        if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_13)) {
+//            data_in |= (1 << i);
+//        }
+//    }
+//
+//    return data_in;
+//}
+//
+//void tmc5160_write(GPIO_TypeDef *cs_port, uint16_t cs_pin,
+//                   uint8_t reg, uint32_t value)
+//{
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
+//
+//    tmc_sw_spi_transfer(reg | 0x80);        // write command
+//    tmc_sw_spi_transfer(value >> 24);
+//    tmc_sw_spi_transfer(value >> 16);
+//    tmc_sw_spi_transfer(value >> 8);
+//    tmc_sw_spi_transfer(value);
+//
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+//}
+//
+///*
+// * Read a TMC5160 register. Reads are pipelined: the first datagram latches the
+// * address, and the *second* datagram returns its contents. We always issue two
+// * frames so the value is valid on a cold read. The first byte clocked back on
+// * any frame is the SPI status byte (returned via status_out).
+// */
+//uint32_t tmc5160_read(GPIO_TypeDef *cs_port, uint16_t cs_pin,
+//                      uint8_t reg, uint8_t *status_out)
+//{
+//    uint8_t addr = reg & 0x7F;   // read access: MSB clear
+//
+//    // Frame 1: latch the address (returned data is stale, discard it).
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
+//    tmc_sw_spi_transfer(addr);
+//    tmc_sw_spi_transfer(0);
+//    tmc_sw_spi_transfer(0);
+//    tmc_sw_spi_transfer(0);
+//    tmc_sw_spi_transfer(0);
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+//
+//    // Frame 2: same address, now the value comes back.
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
+//    uint8_t status = tmc_sw_spi_transfer(addr);
+//    uint32_t value = 0;
+//    value |= (uint32_t)tmc_sw_spi_transfer(0) << 24;
+//    value |= (uint32_t)tmc_sw_spi_transfer(0) << 16;
+//    value |= (uint32_t)tmc_sw_spi_transfer(0) << 8;
+//    value |= (uint32_t)tmc_sw_spi_transfer(0);
+//    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+//
+//    if (status_out != NULL) {
+//        *status_out = status;
+//    }
+//    return value;
+//}
+//
+///*
+// * Read back a few key registers from every TMC5160 so we can tell whether SPI
+// * comms are actually working. On a healthy chip IOIN[31:24] (VERSION) reads
+// * 0x30; a value of 0x00 or 0xFF means the SPI link (MISO/CS/wiring) is dead.
+// */
+//void DiagnoseSPIControllers(void)
+//{
+//    GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
+//    uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
+//    const char *names[5] = {"X/s0", "Y/s1", "Z/s2", "E1/s4", "E3/s6"};
+//
+//    for (uint8_t i = 0; i < 5; i++) {
+//        uint8_t st = 0;
+//        // Clear GSTAT *now* (USB is up, so VS has had seconds to stabilise),
+//        // then read it back. Any flag still set here is a live condition, not a
+//        // stale latch left over from the power-up ramp.
+//        tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007);
+//
+//        uint32_t ioin  = tmc5160_read(cs_ports[i], cs_pins[i], 0x04, &st);
+//        uint32_t ihold  = tmc5160_read(cs_ports[i], cs_pins[i], 0x10, NULL);
+//        uint32_t gconf = tmc5160_read(cs_ports[i], cs_pins[i], 0x00, NULL);
+//        uint32_t gstat = tmc5160_read(cs_ports[i], cs_pins[i], 0x01, NULL);
+//        uint32_t chop  = tmc5160_read(cs_ports[i], cs_pins[i], 0x6C, NULL);
+//        uint32_t drv   = tmc5160_read(cs_ports[i], cs_pins[i], 0x6F, NULL);
+//        printf("TMC %-5s VERSION=0x%02lX status=0x%02X IHOLD_IRUN=%08lX GCONF=0x%08lX "
+//               "GSTAT=0x%lX CHOPCONF=0x%08lX DRV_STATUS=0x%08lX\r\n",
+//               names[i], (ioin >> 24) & 0xFF, st, ihold,
+//               gconf, gstat, chop, drv);
+//    }
+//}
+//
+//void ConfigureSPIControllers() {
+//	// TODO: Dynamic Configuration
+//	GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
+//	uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
+//
+//	// Put the shared SPI bus in its idle state before talking to any driver:
+//	// SCLK high (mode 3 idle) and every CS de-asserted. This matters because at
+//	// boot E3_CS (PD15) is driven low by MX_GPIO_Init, which would leave that
+//	// chip selected and latching every byte meant for the other drivers.
+//	HAL_GPIO_WritePin(SCLK_GPIO_Port, SCLK_Pin, GPIO_PIN_SET);
+//	for (uint8_t i = 0; i < 5; i++){
+//		HAL_GPIO_WritePin(cs_ports[i], cs_pins[i], GPIO_PIN_SET);
+//	}
+//
+//	for (uint8_t i = 0; i < 5; i++){
+//		// CHOPCONF: MRES=16 microsteps (bits 27:24 = 0x4) plus intpol (bit 28)
+//		// so the driver interpolates 16 usteps up to 256 internally -> smoother
+//		// and much quieter than plain 16-ustep spreadCycle.
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x6C, 0x140100C3); // CHOPCONF (MRES=16, intpol)
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x0B, 0x00000080);
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x10, 0x00060701);
+////		tmc5160_write(cs_ports[i], cs_pins[i], 0x0B, 0x00000080); // GLOBALSCALER=160
+////		tmc5160_write(cs_ports[i], cs_pins[i], 0x10, 0x00061001); // IRUN=16, IHOLD=1
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x11, 0x0000000A);		// PWMCONF: reset-default value with pwm_autoscale + pwm_autograd enabled,
+//		// required for stealthChop to self-tune. Must be set before en_pwm_mode.
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x70, 0xC40C001E); // PWMCONF
+//		// GCONF: en_pwm_mode (bit 2) enables stealthChop -> near-silent chopper.
+//		// With TPWMTHRS at its reset default (0) stealthChop stays active at all
+//		// speeds. If you later need more high-speed torque, raise TPWMTHRS so the
+//		// driver hands off to spreadCycle above that velocity.
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x00, 0x00000008); // GCONF (spreadCycle)
+//		// Clear the latched GSTAT flags (reset / drv_err / uv_cp) by writing 1s.
+//		// After this, any flag that reads back set is a *live* condition.
+//		tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007); // GSTAT
+//	}
+//}
+
+/*
+ * Hand a message to the logger task instead of writing it here. Safe to call
+ * from any task (message queues tolerate multiple writers) but NOT from an ISR.
+ * Messages longer than LOG_MSG_MAX are truncated. Before logQueue exists - i.e.
+ * during init, prior to osKernelStart - this falls through to a direct write,
+ * which is fine because nothing is time-critical yet.
+ */
+static void LogDeferred(const char *fmt, ...)
 {
-    uint8_t data_in = 0;
+    va_list args;
+    va_start(args, fmt);
 
-    for (int i = 7; i >= 0; i--) {
-        // SCLK idle high. First pull low, set MOSI while low.
-        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_RESET);
-
-        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14,
-            (data_out & (1 << i)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-
-        // Short delay may be needed if running very fast.
-        __NOP(); __NOP(); __NOP();
-
-        // Rising edge: TMC samples MOSI; MCU samples MISO.
-        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
-
-        __NOP(); __NOP(); __NOP();
-
-        if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_13)) {
-            data_in |= (1 << i);
-        }
+    if (logQueue == NULL)
+    {
+        vprintf(fmt, args);
+        va_end(args);
+        return;
     }
 
-    return data_in;
-}
+    char msg[LOG_MSG_MAX];
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
 
-void tmc5160_write(GPIO_TypeDef *cs_port, uint16_t cs_pin,
-                   uint8_t reg, uint32_t value)
-{
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
-
-    tmc_sw_spi_transfer(reg | 0x80);        // write command
-    tmc_sw_spi_transfer(value >> 24);
-    tmc_sw_spi_transfer(value >> 16);
-    tmc_sw_spi_transfer(value >> 8);
-    tmc_sw_spi_transfer(value);
-
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
+    if (osMessageQueuePut(logQueue, msg, 0, 0) != osOK)
+    {
+        log_drop_count++;
+    }
 }
 
 /*
- * Read a TMC5160 register. Reads are pipelined: the first datagram latches the
- * address, and the *second* datagram returns its contents. We always issue two
- * frames so the value is valid on a cold read. The first byte clocked back on
- * any frame is the SPI status byte (returned via status_out).
+ * Single choke point for the scheduler queue so every producer is accounted
+ * for. A nonzero drop count is a definite, unambiguous loss of a command.
+ *
+ * Queue depth is deliberately NOT sampled here. StartTask1 runs at a higher
+ * priority than every producer, so it preempts and drains inside the put
+ * itself - sampling on this side always reads back zero. The backlog is
+ * measured from the consumer instead.
  */
-uint32_t tmc5160_read(GPIO_TypeDef *cs_port, uint16_t cs_pin,
-                      uint8_t reg, uint8_t *status_out)
+static osStatus_t QueueCommand(const ControllerCommand *cmd)
 {
-    uint8_t addr = reg & 0x7F;   // read access: MSB clear
+    osStatus_t status = osMessageQueuePut(schedulerCommandQueue, cmd, 0, 0);
 
-    // Frame 1: latch the address (returned data is stale, discard it).
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
-    tmc_sw_spi_transfer(addr);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    tmc_sw_spi_transfer(0);
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
-
-    // Frame 2: same address, now the value comes back.
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET);
-    uint8_t status = tmc_sw_spi_transfer(addr);
-    uint32_t value = 0;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 24;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 16;
-    value |= (uint32_t)tmc_sw_spi_transfer(0) << 8;
-    value |= (uint32_t)tmc_sw_spi_transfer(0);
-    HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
-
-    if (status_out != NULL) {
-        *status_out = status;
+    if (status != osOK)
+    {
+        cmd_queue_drop_count++;
     }
-    return value;
-}
 
-/*
- * Read back a few key registers from every TMC5160 so we can tell whether SPI
- * comms are actually working. On a healthy chip IOIN[31:24] (VERSION) reads
- * 0x30; a value of 0x00 or 0xFF means the SPI link (MISO/CS/wiring) is dead.
- */
-void DiagnoseSPIControllers(void)
-{
-    GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
-    uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-    const char *names[5] = {"X/s0", "Y/s1", "Z/s2", "E1/s4", "E3/s6"};
-
-    for (uint8_t i = 0; i < 5; i++) {
-        uint8_t st = 0;
-        // Clear GSTAT *now* (USB is up, so VS has had seconds to stabilise),
-        // then read it back. Any flag still set here is a live condition, not a
-        // stale latch left over from the power-up ramp.
-        tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007);
-
-        uint32_t ioin  = tmc5160_read(cs_ports[i], cs_pins[i], 0x04, &st);
-        uint32_t gconf = tmc5160_read(cs_ports[i], cs_pins[i], 0x00, NULL);
-        uint32_t gstat = tmc5160_read(cs_ports[i], cs_pins[i], 0x01, NULL);
-        uint32_t chop  = tmc5160_read(cs_ports[i], cs_pins[i], 0x6C, NULL);
-        uint32_t drv   = tmc5160_read(cs_ports[i], cs_pins[i], 0x6F, NULL);
-        printf("TMC %-5s VERSION=0x%02lX status=0x%02X GCONF=0x%08lX "
-               "GSTAT=0x%lX CHOPCONF=0x%08lX DRV_STATUS=0x%08lX\r\n",
-               names[i], (ioin >> 24) & 0xFF, st,
-               gconf, gstat, chop, drv);
-    }
-}
-
-void ConfigureSPIControllers() {
-	// TODO: Dynamic Configuration
-	GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
-	uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-
-	// Put the shared SPI bus in its idle state before talking to any driver:
-	// SCLK high (mode 3 idle) and every CS de-asserted. This matters because at
-	// boot E3_CS (PD15) is driven low by MX_GPIO_Init, which would leave that
-	// chip selected and latching every byte meant for the other drivers.
-	HAL_GPIO_WritePin(SCLK_GPIO_Port, SCLK_Pin, GPIO_PIN_SET);
-	for (uint8_t i = 0; i < 5; i++){
-		HAL_GPIO_WritePin(cs_ports[i], cs_pins[i], GPIO_PIN_SET);
-	}
-
-	for (uint8_t i = 0; i < 5; i++){
-		// CHOPCONF: MRES=16 microsteps (bits 27:24 = 0x4) plus intpol (bit 28)
-		// so the driver interpolates 16 usteps up to 256 internally -> smoother
-		// and much quieter than plain 16-ustep spreadCycle.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x6C, 0x140100C3); // CHOPCONF (MRES=16, intpol)
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x10, 0x00061F0A); // IHOLD_IRUN
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x11, 0x0000000A); // TPOWERDOWN
-		// PWMCONF: reset-default value with pwm_autoscale + pwm_autograd enabled,
-		// required for stealthChop to self-tune. Must be set before en_pwm_mode.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x70, 0xC40C001E); // PWMCONF
-		// GCONF: en_pwm_mode (bit 2) enables stealthChop -> near-silent chopper.
-		// With TPWMTHRS at its reset default (0) stealthChop stays active at all
-		// speeds. If you later need more high-speed torque, raise TPWMTHRS so the
-		// driver hands off to spreadCycle above that velocity.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x00, 0x00000004); // GCONF (stealthChop)
-		// Clear the latched GSTAT flags (reset / drv_err / uv_cp) by writing 1s.
-		// After this, any flag that reads back set is a *live* condition.
-		tmc5160_write(cs_ports[i], cs_pins[i], 0x01, 0x00000007); // GSTAT
-	}
+    return status;
 }
 
 void HandleUsbCommand(const char *line)
@@ -517,95 +649,233 @@ void HandleUsbCommand(const char *line)
     ControllerCommand cmd = {0};
 
     int motor_id;
-    long target;
-    long speed;
-    printf("Parsing Command: %s\r\n", line);
-    osDelay(5);
-    if (sscanf(line, "MOVEABS %d %ld %ld", &motor_id, &target, &speed) == 3) {
-        cmd.source = TRANSPORT_USB;
-        cmd.type = CMD_MOVE_ABS;
-        cmd.motor_id = motor_id;
-        cmd.target = target;
-        cmd.speed = speed;
-        osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
-        if (status == osOK) {
-            printf("OK QUEUED MOVEABS %d %ld %ld\r\n", motor_id, target, speed);
+    LogTrace("Parsing Command: %s\r\n", line);
+    if (strncmp(line, "MOVEABS", 7) == 0 && (line[7] == ' ' || line[7] == '\0')) {
+        // Batched absolute move: "MOVEABS <id> <pos> <speed> [<id> <pos> <speed> ...]".
+        // Each triple is scanned with a trailing %n so we know how far the
+        // cursor advanced, then queued as its own independent ControllerCommand
+        // (same as a standalone single-motor MOVEABS) - the batch is
+        // intentionally NOT atomic, so under queue pressure some motors can
+        // be queued while others in the same line are dropped.
+        const char *cursor = line + 7;
+        int motors_queued = 0;
+        int motors_failed = 0;
+
+        for (;;) {
+            int id;
+            long pos;
+            long spd;
+            int consumed = 0;
+            if (sscanf(cursor, " %d %ld %ld%n", &id, &pos, &spd, &consumed) != 3) {
+                break;
+            }
+            cursor += consumed;
+
+            cmd = (ControllerCommand){0};
+            cmd.source = TRANSPORT_USB;
+            cmd.type = CMD_MOVE_ABS;
+            cmd.motor_id = id;
+            cmd.target = pos;
+            cmd.speed = spd;
+            osStatus_t status = QueueCommand(&cmd);
+            if (status == osOK) {
+                LogTrace("OK QUEUED MOVEABS %d %ld %ld\r\n", id, pos, spd);
+                motors_queued++;
+            } else {
+                LogDeferred("ERR QUEUE PUT FAILED status=%d motor=%d\r\n", (int)status, id);
+                motors_failed++;
+            }
         }
-        else {
-            printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+
+        if (motors_queued == 0 && motors_failed == 0) {
+            LogDeferred("ERR INVALID MOVEABS SYNTAX\r\n");
+        } else {
+            LogDeferred("MOVEABS BATCH DONE queued=%d failed=%d\r\n", motors_queued, motors_failed);
         }
         return;
     }
-    if (sscanf(line, "MOVEREL %d %ld %ld", &motor_id, &target, &speed) == 3){
-    	cmd.source = TRANSPORT_USB;
-		cmd.type = CMD_MOVE_REL;
-		cmd.motor_id = motor_id;
-		cmd.target = target;
-		cmd.speed = speed;
-		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
-		if (status == osOK) {
-			printf("OK QUEUED MOVEREL %d %ld %ld\r\n", motor_id, target, speed);
-		}
-		else {
-			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
-		}
-		return;
+    if (strncmp(line, "MOVEREL", 7) == 0 && (line[7] == ' ' || line[7] == '\0')) {
+        // Batched relative move: "MOVEREL <id> <pos> <speed> [<id> <pos> <speed> ...]".
+        // Each triple is scanned with a trailing %n so we know how far the
+        // cursor advanced, then queued as its own independent ControllerCommand
+        // (same as a standalone single-motor MOVEREL) - the batch is
+        // intentionally NOT atomic, so under queue pressure some motors can
+        // be queued while others in the same line are dropped.
+        const char *cursor = line + 7;
+        int motors_queued = 0;
+        int motors_failed = 0;
+
+        for (;;) {
+            int id;
+            long pos;
+            long spd;
+            int consumed = 0;
+            if (sscanf(cursor, " %d %ld %ld%n", &id, &pos, &spd, &consumed) != 3) {
+                break;
+            }
+            cursor += consumed;
+
+            cmd = (ControllerCommand){0};
+            cmd.source = TRANSPORT_USB;
+            cmd.type = CMD_MOVE_REL;
+            cmd.motor_id = id;
+            cmd.target = pos;
+            cmd.speed = spd;
+            osStatus_t status = QueueCommand(&cmd);
+            if (status == osOK) {
+                LogTrace("OK QUEUED MOVEREL %d %ld %ld\r\n", id, pos, spd);
+                motors_queued++;
+            } else {
+                LogDeferred("ERR QUEUE PUT FAILED status=%d motor=%d\r\n", (int)status, id);
+                motors_failed++;
+            }
+        }
+
+        if (motors_queued == 0 && motors_failed == 0) {
+            LogDeferred("ERR INVALID MOVEREL SYNTAX\r\n");
+        } else {
+            LogDeferred("MOVEREL BATCH DONE queued=%d failed=%d\r\n", motors_queued, motors_failed);
+        }
+        return;
     }
-    if (sscanf(line, "MOVESPEED %d %ld", &motor_id, &speed) == 2){
-		cmd.source = TRANSPORT_USB;
-		cmd.type = CMD_SET_SPEED;
-		cmd.motor_id = motor_id;
-		cmd.target = speed < 0 ? NINF : INF;
-		cmd.speed = speed;
-		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
-		if (status == osOK) {
-			printf("OK QUEUED MOVESPEED %d %ld\r\n", motor_id, speed);
-		}
-		else {
-			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
-		}
-		return;
-	}
-    if (sscanf(line, "STOP %d", &motor_id) == 1){
-		cmd.source = TRANSPORT_USB;
-		cmd.type = CMD_STOP;
-		cmd.motor_id = motor_id;
-		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
-		if (status == osOK) {
-			printf("OK QUEUED STOP %d\r\n", motor_id);
-		}
-		else {
-			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
-		}
-		return;
-	}
-    if (sscanf(line, "DISABLE %d", &motor_id) == 1){
-    		cmd.source = TRANSPORT_USB;
-    		cmd.type = CMD_DISABLE;
-    		cmd.motor_id = motor_id;
-    		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
-    		if (status == osOK) {
-    			printf("OK QUEUED DISABLE %d\r\n", motor_id);
-    		}
-    		else {
-    			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
-    		}
-    		return;
-    	}
+    if (strncmp(line, "MOVESPEED", 9) == 0 && (line[9] == ' ' || line[9] == '\0')) {
+        // Batched speed move: "MOVESPEED <id> <speed> [<id> <speed> ...]".
+        // Each pair is scanned with a trailing %n so we know how far the
+        // cursor advanced, then queued as its own independent ControllerCommand
+        // (same as a standalone single-motor MOVESPEED) - the batch is
+        // intentionally NOT atomic, so under queue pressure some motors can
+        // be queued while others in the same line are dropped.
+        const char *cursor = line + 9;
+        int motors_queued = 0;
+        int motors_failed = 0;
+
+        for (;;) {
+            int id;
+            long spd;
+            int consumed = 0;
+            if (sscanf(cursor, " %d %ld%n", &id, &spd, &consumed) != 2) {
+                break;
+            }
+            cursor += consumed;
+
+            cmd = (ControllerCommand){0};
+            cmd.source = TRANSPORT_USB;
+            cmd.type = CMD_SET_SPEED;
+            cmd.motor_id = id;
+            cmd.target = spd < 0 ? NINF : INF;
+            cmd.speed = spd;
+            osStatus_t status = QueueCommand(&cmd);
+            if (status == osOK) {
+                LogTrace("OK QUEUED MOVESPEED %d %ld\r\n", id, spd);
+                motors_queued++;
+            } else {
+                LogDeferred("ERR QUEUE PUT FAILED status=%d motor=%d\r\n", (int)status, id);
+                motors_failed++;
+            }
+        }
+
+        if (motors_queued == 0 && motors_failed == 0) {
+            LogDeferred("ERR INVALID MOVESPEED SYNTAX\r\n");
+        } else {
+            LogDeferred("MOVESPEED BATCH DONE queued=%d failed=%d\r\n", motors_queued, motors_failed);
+        }
+        return;
+    }
+    if (strncmp(line, "STOP", 4) == 0 && (line[4] == ' ' || line[4] == '\0')) {
+        // Batched stop: "STOP <id> [<id> ...]". Each id is scanned with a
+        // trailing %n so we know how far the cursor advanced, then queued as
+        // its own independent ControllerCommand (same as a standalone
+        // single-motor STOP) - the batch is intentionally NOT atomic, so
+        // under queue pressure some motors can be queued while others in the
+        // same line are dropped.
+        const char *cursor = line + 4;
+        int motors_queued = 0;
+        int motors_failed = 0;
+
+        for (;;) {
+            int id;
+            int consumed = 0;
+            if (sscanf(cursor, " %d%n", &id, &consumed) != 1) {
+                break;
+            }
+            cursor += consumed;
+
+            cmd = (ControllerCommand){0};
+            cmd.source = TRANSPORT_USB;
+            cmd.type = CMD_STOP;
+            cmd.motor_id = id;
+            osStatus_t status = QueueCommand(&cmd);
+            if (status == osOK) {
+                LogTrace("OK QUEUED STOP %d\r\n", id);
+                motors_queued++;
+            } else {
+                LogDeferred("ERR QUEUE PUT FAILED status=%d motor=%d\r\n", (int)status, id);
+                motors_failed++;
+            }
+        }
+
+        if (motors_queued == 0 && motors_failed == 0) {
+            LogDeferred("ERR INVALID STOP SYNTAX\r\n");
+        } else {
+            LogDeferred("STOP BATCH DONE queued=%d failed=%d\r\n", motors_queued, motors_failed);
+        }
+        return;
+    }
+    if (strncmp(line, "DISABLE", 7) == 0 && (line[7] == ' ' || line[7] == '\0')) {
+        // Batched disable: "DISABLE <id> [<id> ...]". Each id is scanned with
+        // a trailing %n so we know how far the cursor advanced, then queued
+        // as its own independent ControllerCommand (same as a standalone
+        // single-motor DISABLE) - the batch is intentionally NOT atomic, so
+        // under queue pressure some motors can be queued while others in the
+        // same line are dropped.
+        const char *cursor = line + 7;
+        int motors_queued = 0;
+        int motors_failed = 0;
+
+        for (;;) {
+            int id;
+            int consumed = 0;
+            if (sscanf(cursor, " %d%n", &id, &consumed) != 1) {
+                break;
+            }
+            cursor += consumed;
+
+            cmd = (ControllerCommand){0};
+            cmd.source = TRANSPORT_USB;
+            cmd.type = CMD_DISABLE;
+            cmd.motor_id = id;
+            osStatus_t status = QueueCommand(&cmd);
+            if (status == osOK) {
+                LogTrace("OK QUEUED DISABLE %d\r\n", id);
+                motors_queued++;
+            } else {
+                LogDeferred("ERR QUEUE PUT FAILED status=%d motor=%d\r\n", (int)status, id);
+                motors_failed++;
+            }
+        }
+
+        if (motors_queued == 0 && motors_failed == 0) {
+            LogDeferred("ERR INVALID DISABLE SYNTAX\r\n");
+        } else {
+            LogDeferred("DISABLE BATCH DONE queued=%d failed=%d\r\n", motors_queued, motors_failed);
+        }
+        return;
+    }
     if (sscanf(line, "STATUS %d", &motor_id) == 1){
 		cmd.source = TRANSPORT_USB;
 		cmd.type = CMD_STATUS;
 		cmd.motor_id = motor_id;
-		osStatus_t status = osMessageQueuePut(schedulerCommandQueue, &cmd, 0, 0);
+		osStatus_t status = QueueCommand(&cmd);
 		if (status == osOK) {
-			printf("OK QUEUED STATUS %d\r\n", motor_id);
+			LogTrace("OK QUEUED STATUS %d\r\n", motor_id);
 		}
 		else {
-			printf("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
+			LogDeferred("ERR QUEUE PUT FAILED status=%d\r\n", (int)status);
 		}
 		return;
 	}
-    printf("Invalid Command Received.\r\n");
+    cmd_invalid_count++;
+    LogDeferred("Invalid Command Received.\r\n");
 }
 
 
@@ -648,16 +918,23 @@ static void MotorController_HandlePosMove(
 		target += stepper->position;
 	}
 	stepper->target = target;
+	stepper->mode = (command == CMD_SET_SPEED) ? MODE_SPEED : MODE_POS;
+	stepper->ramp_accumulator = 0;
 	if(command == CMD_SET_SPEED) {
 		stepper->target *= 0xFFFF;
 	}
 
 	uint8_t speed = decodeSpeed(ulNotifiedValue);
 	if (command == CMD_SET_SPEED && speed == 0) {
-		stepper->speed = 0;
+		stepper->commanded_speed = 0;
 		stepper->target = stepper->position;
 	} else {
-		stepper->speed = speed == 0 ? DEFAULT_SPEED : abs(speed);
+		stepper->commanded_speed = speed == 0 ? DEFAULT_SPEED : abs(speed);
+		if (command != CMD_SET_SPEED) {
+			// Position moves snap straight to their commanded speed; only
+			// speed-mode commands ramp gradually (see HAL_TIM_PeriodElapsedCallback).
+			stepper->speed = stepper->commanded_speed;
+		}
 	}
 	stepper->enabled = 1;
 	stepper->accumulator = 0;
@@ -731,6 +1008,23 @@ int main(void)
   {
       printf("ADC DMA started OK\r\n");
   }
+
+  /* Silence the ADC DMA completion interrupts.
+   *
+   * ADC1 free-runs (ContinuousConvMode) over 4 channels at 3-cycle sampling on
+   * a 21 MHz ADC clock, so a full scan completes every ~2.9us. HAL_DMA_Start_IT
+   * enables transfer-complete unconditionally and HAL_ADC_Start_DMA installs a
+   * half-transfer callback, which together fired ~700k interrupts per second -
+   * more than one per 240 CPU cycles, i.e. effectively the entire core spent
+   * inside HAL_DMA_IRQHandler. Tasks were left with a fraction of a percent of
+   * the CPU, which is why the logger's bit-banged TMC reads took ~0.9s apiece
+   * instead of ~2ms, and why the same code is fast when it runs above (before
+   * the ADC is started).
+   *
+   * Nothing needs these interrupts: the DMA writes encoder_adc[] circularly in
+   * hardware and no conversion callback is implemented. Transfer-error and
+   * direct-mode-error stay enabled so genuine faults are still caught. */
+  __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_HT);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -765,6 +1059,9 @@ int main(void)
   /* creation of usbCommand */
   usbCommandHandle = osThreadNew(StartTask04, NULL, &usbCommand_attributes);
 
+  /* creation of outputWriter */
+  outputWriterHandle = osThreadNew(StartTask05, NULL, &outputWriter_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   for (int i = 0; i < NUM_STEPPERS; i++){
 	  motorTaskHandles[i] = osThreadNew(StartTask2, &motorCtx[i], &motorController_attributes);
@@ -773,6 +1070,11 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_EVENTS */
   schedulerCommandQueue = osMessageQueueNew(16, sizeof(ControllerCommand), NULL);
+  logQueue = osMessageQueueNew(LOG_QUEUE_DEPTH, LOG_MSG_MAX, NULL);
+  if (schedulerCommandQueue == NULL || logQueue == NULL)
+  {
+    Error_Handler();
+  }
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
@@ -1010,18 +1312,17 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, XY_Enable_Pin|E3_Enable_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, E4_CS_Pin|E2_CS_Pin|E2_Enable_Pin|E1_CS_Pin
-                          |E1_Enable_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, E4_Dir_Pin|E4_Step_Pin|E2_Dir_Pin|E2_Step_Pin
+                          |E1_Dir_Pin|E1_Step_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, E4_Dir_Pin|E4_Step_Pin|E3_CS_Pin|E2_Dir_Pin
-                          |E2_Step_Pin|E1_Dir_Pin|E1_Step_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, E0_CS_Pin|E04_Enable_Pin|Z_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, E3_CS_Pin|E2_Enable_Pin|E1_CS_Pin|E1_Enable_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, E0_Dir_Pin|E0_Step_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, E04_Enable_Pin|Z_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : Z_Enable_Pin */
   GPIO_InitStruct.Pin = Z_Enable_Pin;
@@ -1059,12 +1360,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MISO_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : E4_CS_Pin E4_Dir_Pin E4_Step_Pin E3_CS_Pin
-                           E2_CS_Pin E2_Dir_Pin E2_Step_Pin E1_CS_Pin
-                           E1_Dir_Pin E1_Step_Pin */
-  GPIO_InitStruct.Pin = E4_CS_Pin|E4_Dir_Pin|E4_Step_Pin|E3_CS_Pin
-                          |E2_CS_Pin|E2_Dir_Pin|E2_Step_Pin|E1_CS_Pin
-                          |E1_Dir_Pin|E1_Step_Pin;
+  /*Configure GPIO pins : E4_Dir_Pin E4_Step_Pin E3_CS_Pin E2_Dir_Pin
+                           E2_Step_Pin E1_CS_Pin E1_Dir_Pin E1_Step_Pin */
+  GPIO_InitStruct.Pin = E4_Dir_Pin|E4_Step_Pin|E3_CS_Pin|E2_Dir_Pin
+                          |E2_Step_Pin|E1_CS_Pin|E1_Dir_Pin|E1_Step_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1077,8 +1376,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : E0_CS_Pin E0_Dir_Pin E0_Step_Pin Z_CS_Pin */
-  GPIO_InitStruct.Pin = E0_CS_Pin|E0_Dir_Pin|E0_Step_Pin|Z_CS_Pin;
+  /*Configure GPIO pins : E0_Dir_Pin E0_Step_Pin Z_CS_Pin */
+  GPIO_InitStruct.Pin = E0_Dir_Pin|E0_Step_Pin|Z_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1156,8 +1455,8 @@ void ReportPreviousReset(void)
         cause_str = "HARD FAULT";
     }
 
-    printf("\r\n*** PREVIOUS RESET CAUSE: %s (task: '%s') ***\r\n",
-           cause_str, g_reset_report.task);
+    LogDeferred("\r\n*** PREVIOUS RESET CAUSE: %s (task: '%s') ***\r\n",
+                cause_str, g_reset_report.task);
 
     g_reset_report.magic = 0;
     g_reset_report.cause = 0;
@@ -1190,36 +1489,49 @@ void StartTask1(void *argument)
 
 		if (status == osOK)
 		{
-			printf("Received Command for motor: %d!\r\n", cmd.motor_id);
+			/* Backlog at the moment this consumer woke, counting the command
+			 * just taken. Reads 1 whenever the consumer is keeping up; a
+			 * climbing value means producers are outrunning dispatch. */
+			uint32_t backlog =
+				(uint32_t)osMessageQueueGetCount(schedulerCommandQueue) + 1U;
+			if (backlog > cmd_queue_peak)
+			{
+				cmd_queue_peak = backlog;
+			}
 
+			/* A malformed id must not take the dispatcher down with it: this
+			 * used to break out of the loop, which returns from the task and
+			 * permanently stops all command dispatch. */
 			if (cmd.motor_id >= NUM_STEPPERS)
 			{
-				printf("ERR BAD MOTOR ID %d\r\n", cmd.motor_id);
-				break;
+				LogDeferred("ERR BAD MOTOR ID %d\r\n", cmd.motor_id);
+				continue;
 			}
 
 			if (motorTaskHandles[cmd.motor_id] == NULL)
 			{
-				printf("ERR MOTOR HANDLE NULL %d\r\n", cmd.motor_id);
-				break;
+				LogDeferred("ERR MOTOR HANDLE NULL %d\r\n", cmd.motor_id);
+				continue;
 			}
 
 			if (cmd.type == CMD_STATUS) {
 				StepperMotor *stepper = motorCtx[cmd.motor_id].stepper;
-				printf(
-					"Motor (%d) Status: target=%ld, position=%ld, speed=%d, enabled=%d, mode=%s\r\n",
+				LogDeferred(
+					"Motor (%d) Status: target=%ld, position=%ld, speed=%d, commanded_speed=%d, enabled=%d, mode=%s\r\n",
 					cmd.motor_id,
 					stepper->target,
 					stepper->position,
 					stepper->speed,
+					stepper->commanded_speed,
 					stepper->enabled,
 					stepper->mode == MODE_POS ? "position" : "speed"
 				);
 				continue;
 			}
 
-       printf("Setting Stepper target: %ld, speed: %lu\r\n", cmd.target, cmd.speed);
 			uint32_t notifyValue = encodeCommand(cmd.target, cmd.speed < 0, abs(cmd.speed), cmd.type);
+
+			notify_sent[cmd.motor_id]++;
 
 			BaseType_t result = xTaskNotify(
 				motorTaskHandles[cmd.motor_id],
@@ -1227,7 +1539,12 @@ void StartTask1(void *argument)
 				eSetValueWithOverwrite
 			);
 
-			printf("Notify result=%ld\r\n", (long)result);
+			/* eSetValueWithOverwrite always succeeds, so only a failure is worth
+			 * reporting - logging every notify just burned USB bandwidth. */
+			if (result != pdPASS)
+			{
+				LogDeferred("ERR NOTIFY FAILED motor=%d\r\n", cmd.motor_id);
+			}
 		}
 	}
   /* USER CODE END 5 */
@@ -1251,18 +1568,21 @@ void StartTask2(void *argument)
 	for(;;)
 	{
         if (xTaskNotifyWait(0, 0xFFFF, &ulNotifiedValue, osWaitForever)==pdTRUE){
+        	notify_recv[context->id]++;
         	CommandType command = decodeCommand(ulNotifiedValue);
         	switch (command) {
         		case CMD_STOP: {
         			stepper->speed = 0;
+        			stepper->commanded_speed = 0;
         			stepper->mode = MODE_SPEED;
         			stepper->enabled = 1;
         			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, context->enable_active_state);
         			break;
         		}
         		case CMD_DISABLE: {
-        			printf("Recieved Disable Command, setting pin to: %d", !context->enable_active_state);
         			HAL_GPIO_WritePin(context->enable_port, context->enable_pin, !context->enable_active_state);
+        			LogDeferred("Received Disable Command, set pin to: %d\r\n",
+        			            !context->enable_active_state);
         			break;
         		}
         		case CMD_MOVE_REL: {
@@ -1294,14 +1614,53 @@ void StartTask2(void *argument)
 void StartTask03(void *argument)
 {
   /* USER CODE BEGIN StartTask03 */
+  /* Diagnostics only - this task performs no USB writes at all. Every line it
+   * produces is handed to outputWriter, so the seconds it spends bit-banging
+   * TMC5160 registers below can no longer hold up a command acknowledgement.
+   * It is also the lowest-priority task in the system, so those register reads
+   * only ever consume slack CPU. */
   /* Infinite loop */
   for(;;)
   {
-//	  printf("USB rx_cb=%lu rx_bytes=%lu rx_drop=%lu lines=%lu\r\n",
-//	         usb_rx_callback_count,
-//	         usb_rx_byte_count,
-//	         usb_rx_drop_count,
-//	         usb_command_lines);
+	  if (log_drop_count != 0)
+	  {
+		  LogDeferred("WARN deferred log records dropped=%lu\r\n",
+		              (unsigned long)log_drop_count);
+	  }
+
+	  /* Command-path accounting. Each stage that can lose a command reports
+	   * here, so a drop can be attributed instead of guessed at:
+	   *   rx_drop  - bytes the USB ISR could not fit into usbRxStream. Nonzero
+	   *              means lines are being corrupted mid-flight, which shows up
+	   *              as truncated batches or invalid syntax, not clean losses.
+	   *   invalid  - lines that matched no command (a good corruption proxy).
+	   *   qdrop    - commands rejected by a full scheduler queue.
+	   *   qpeak    - deepest backlog seen by the dispatcher, out of 16. Stays
+	   *              at 1 while dispatch keeps up with the producers.
+	   *   coalesced- notifications overwritten before the motor task consumed
+	   *              them, i.e. superseded commands. */
+	  {
+	    uint32_t sent_total = 0;
+	    uint32_t recv_total = 0;
+	    for (int i = 0; i < NUM_STEPPERS; i++)
+	    {
+	      sent_total += notify_sent[i];
+	      recv_total += notify_recv[i];
+	    }
+	    LogDeferred("RX cb=%lu bytes=%lu rx_drop=%lu lines=%lu invalid=%lu\r\n",
+	           (unsigned long)usb_rx_callback_count,
+	           (unsigned long)usb_rx_byte_count,
+	           (unsigned long)usb_rx_drop_count,
+	           (unsigned long)usb_command_lines,
+	           (unsigned long)cmd_invalid_count);
+	    LogDeferred("CMD qdrop=%lu qpeak=%lu/16 notify_sent=%lu recv=%lu coalesced=%lu\r\n",
+	           (unsigned long)cmd_queue_drop_count,
+	           (unsigned long)cmd_queue_peak,
+	           (unsigned long)sent_total,
+	           (unsigned long)recv_total,
+	           (unsigned long)(sent_total - recv_total));
+	  }
+
 	  /* 12-bit ADC (0..4095) mapped to a 0..360 degree angle. Buffer must be
 	   * uint16_t to match the halfword DMA config in HAL_ADC_MspInit. */
 	  uint32_t deg_x10[NUM_ENCODERS];
@@ -1309,7 +1668,7 @@ void StartTask03(void *argument)
 	  {
 	    deg_x10[i] = ((uint32_t)encoder_adc[i] * 3600U) / 4096U;
 	  }
-	  printf("ADC: IN4=%lu.%lu IN5=%lu.%lu IN6=%lu.%lu IN7=%lu.%lu\r\n",
+	  LogDeferred("ADC: IN4=%lu.%lu IN5=%lu.%lu IN6=%lu.%lu IN7=%lu.%lu\r\n",
 	         deg_x10[0] / 10U, deg_x10[0] % 10U,
 	         deg_x10[1] / 10U, deg_x10[1] % 10U,
 	         deg_x10[2] / 10U, deg_x10[2] % 10U,
@@ -1317,10 +1676,13 @@ void StartTask03(void *argument)
 
 	  /* Minimum free stack ever seen, in words (x4 = bytes). A value near 0
 	   * means that task is about to overflow - bump its stack_size. */
-	  printf("Stack free words: motor0=%lu logger=%lu usb=%lu\r\n",
+	  LogDeferred("Stack free words: motor0=%lu logger=%lu usb=%lu out=%lu\r\n",
 	         (unsigned long)uxTaskGetStackHighWaterMark(motorTaskHandles[0]),
 	         (unsigned long)uxTaskGetStackHighWaterMark(NULL),
-	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle));
+	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle),
+	         (unsigned long)uxTaskGetStackHighWaterMark(outputWriterHandle));
+
+//	  DiagnoseSPIControllers();
 
 	  /* Live TMC5160 microstep counter. MSCNT (0x6A) advances only when the
 	   * driver actually receives STEP pulses, so if you command a move and the
@@ -1329,7 +1691,7 @@ void StartTask03(void *argument)
 	  {
 	    GPIO_TypeDef* cs_ports[5] = {GPIOE, GPIOE, GPIOB, GPIOD, GPIOD};
 	    uint16_t cs_pins[5] = {GPIO_PIN_6, GPIO_PIN_3, GPIO_PIN_7, GPIO_PIN_4, GPIO_PIN_15};
-	    printf("MSCNT X=%lu Y=%lu Z=%lu E1=%lu E3=%lu\r\n",
+	    LogDeferred("MSCNT X=%lu Y=%lu Z=%lu E1=%lu E3=%lu\r\n",
 	           tmc5160_read(cs_ports[0], cs_pins[0], 0x6A, NULL) & 0x3FF,
 	           tmc5160_read(cs_ports[1], cs_pins[1], 0x6A, NULL) & 0x3FF,
 	           tmc5160_read(cs_ports[2], cs_pins[2], 0x6A, NULL) & 0x3FF,
@@ -1345,7 +1707,7 @@ void StartTask03(void *argument)
 	     *   ot/otpw    = over-temp (shutdown / pre-warning)
 	     *   stst       = standstill (no steps recently) */
 	    uint32_t drv = tmc5160_read(cs_ports[1], cs_pins[1], 0x6F, NULL);
-	    printf("Y DRV_STATUS=0x%08lX cs_actual=%lu stst=%lu ola=%lu olb=%lu "
+	    LogDeferred("Y DRV_STATUS=0x%08lX cs_actual=%lu stst=%lu ola=%lu olb=%lu "
 	           "s2ga=%lu s2gb=%lu s2vsa=%lu s2vsb=%lu ot=%lu otpw=%lu\r\n",
 	           drv,
 	           (drv >> 16) & 0x1F,
@@ -1360,9 +1722,41 @@ void StartTask03(void *argument)
 	           (drv >> 26) & 0x1);
 	  }
 
-	  osDelay(1000);
+	  osDelay(DIAG_INTERVAL_MS);
   }
   /* USER CODE END StartTask03 */
+}
+
+/* USER CODE BEGIN Header_StartTask05 */
+/**
+* @brief Function implementing the outputWriter thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask05 */
+void StartTask05(void *argument)
+{
+  /* USER CODE BEGIN StartTask05 */
+  /* Sole owner of stdout. Everything else in the firmware queues text through
+   * LogDeferred and returns immediately, so no task ever blocks on USB except
+   * this one - and nothing depends on this one making progress.
+   *
+   * Being the only writer also matters for correctness: configUSE_NEWLIB_REENTRANT
+   * is 0, so two tasks calling printf concurrently would share and corrupt a
+   * single stdout buffer. */
+  char msg[LOG_MSG_MAX];
+
+  for(;;)
+  {
+	  if (osMessageQueueGet(logQueue, msg, NULL, osWaitForever) != osOK)
+	  {
+		  continue;
+	  }
+
+	  fputs(msg, stdout);
+	  fflush(stdout);
+  }
+  /* USER CODE END StartTask05 */
 }
 
 /* USER CODE BEGIN Header_StartTask04 */
@@ -1383,7 +1777,6 @@ void StartTask04(void *argument)
 	  Error_Handler();
 	}
 	MX_USB_DEVICE_Init();
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
 
 	/* Wait (up to ~3s) for the host to enumerate, then report any crash that
 	 * caused the previous reset. _write drops output until USB is configured. */
@@ -1397,45 +1790,41 @@ void StartTask04(void *argument)
 	ReportPreviousReset();
 
 	/* Dump each TMC5160's identity/status now that USB can carry the output. */
-	DiagnoseSPIControllers();
+//	DiagnoseSPIControllers();
 
 	char line[USB_LINE_MAX];
 	size_t line_len = 0;
 	uint8_t ch;
 	for (;;)
 	{
+		/* Nothing in this loop may block on USB. The old per-character echo
+		 * did exactly that - printf + fflush per byte meant one 1-byte USB
+		 * packet, and so ~1ms, for every character of every command. */
 		if (xStreamBufferReceive(usbRxStream, &ch, 1, portMAX_DELAY) == 1)
 		{
-			if (ch == '\r')
-			{
-				printf("\r\n");
-			} else {
-				printf("%c", ch);
-			}
-			fflush(stdout);
-
 			if (ch == '\n' || ch == '\r')
 			{
 				line[line_len] = '\0';
 
 				if (line_len > 0)
 				{
+#if USB_ECHO_ENABLED
+					LogDeferred("%s\r\n", line);
+#endif
+					usb_command_lines++;
 					HandleUsbCommand(line);
 				}
 
 				line_len = 0;
 			}
+			else if (line_len < USB_LINE_MAX - 1)
+			{
+				line[line_len++] = (char)ch;
+			}
 			else
 			{
-				if (line_len < USB_LINE_MAX - 1)
-				{
-					line[line_len++] = (char)ch;
-				}
-				else
-				{
-					line_len = 0;
-					printf("ERR LINE_TOO_LONG\r\n");
-				}
+				line_len = 0;
+				LogDeferred("ERR LINE_TOO_LONG\r\n");
 			}
 		}
 	}
@@ -1468,6 +1857,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			if (steppers[i].target==steppers[i].position) {
 				steppers[i].enabled = 0;
 				continue;
+			}
+			if (steppers[i].mode == MODE_SPEED && steppers[i].speed != steppers[i].commanded_speed) {
+				steppers[i].ramp_accumulator++;
+				if (steppers[i].ramp_accumulator >= RAMP_ACCUMULATOR_THRESHOLD) {
+					steppers[i].ramp_accumulator = 0;
+					if (steppers[i].speed < steppers[i].commanded_speed) {
+						steppers[i].speed += SPEED_RAMP_STEP;
+						if (steppers[i].speed > steppers[i].commanded_speed)
+							steppers[i].speed = steppers[i].commanded_speed;
+					} else {
+						steppers[i].speed -= SPEED_RAMP_STEP;
+						if (steppers[i].speed < steppers[i].commanded_speed)
+							steppers[i].speed = steppers[i].commanded_speed;
+					}
+				}
+			} else {
+				steppers[i].ramp_accumulator = 0;
 			}
 			if (steppers[i].step_high) {
 				steppers[i].step_port->BSRR = (uint32_t)steppers[i].step_pin << 16; // STEP low

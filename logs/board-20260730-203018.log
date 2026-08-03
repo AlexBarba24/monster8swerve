@@ -1,0 +1,22 @@
+# 2026-07-30 20:30:18 log opened: /home/swervepi/swerveDriver/logs/board-20260730-203018.log
+# 2026-07-30 20:30:18 serial opened /dev/ttyACM0 @ 115200 baud
+20:30:18.412 < RX cb=0 bytes=0 rx_drop=0 lines=0 invalid=0
+20:30:18.412 < CMD qdrop=0 qpeak=0/16 notify_sent=0 recv=0 coalesced=0
+20:30:18.413 < ADC: IN4=355.6 IN5=163.2 IN6=354.1 IN7=355.9
+20:30:18.413 < Stack free words: motor0=218 logger=310 usb=896
+20:30:18.413 > STATUS 1
+20:30:19.414 > STATUS 3
+20:30:20.415 > STATUS 5
+20:30:21.315 < MSCNT X=808 Y=680 Z=1016 E1=264 E3=40
+20:30:21.415 > STATUS 7
+20:30:22.277 < Y DRV_STATUS=0x8005003A cs_actual=5 stst=1 ola=0 olb=0 s2ga=0 s2gb=0 s2vsa=0 s2vsb=0 ot=0 otpw=0
+20:30:22.290 < Motor (1) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:30:22.303 < Motor (3) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:30:22.318 < Motor (5) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:30:22.332 < Motor (7) Status: target=0, position=0, speed=0, commanded_speed=0, enabled=0, mode=position
+20:30:22.373 < RX cb=4 bytes=36 rx_drop=0 lines=4 invalid=0
+20:30:22.406 < CMD qdrop=0 qpeak=0/16 notify_sent=0 recv=0 coalesced=0
+20:30:22.696 < ADC: IN4=355.4 IN5=163.0 IN6=355.6 IN7=355.6
+20:30:22.744 < S
+# 2026-07-30 20:30:22 serial closed
+# 2026-07-30 20:30:22 log closed
