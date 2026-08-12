@@ -175,6 +175,83 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
 }
 
 /**
+  * @brief CAN MSP Initialization
+  * This function configures the hardware resources used in this example
+  * @param hcan: CAN handle pointer
+  * @retval None
+  */
+void HAL_CAN_MspInit(CAN_HandleTypeDef* hcan)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  if(hcan->Instance==CAN1)
+  {
+    /* USER CODE BEGIN CAN1_MspInit 0 */
+
+    /* USER CODE END CAN1_MspInit 0 */
+    /* Peripheral clock enable */
+    __HAL_RCC_CAN1_CLK_ENABLE();
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    /**CAN1 GPIO Configuration
+    PB8     ------> CAN1_RX
+    PB9     ------> CAN1_TX
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF9_CAN1;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN CAN1_MspInit 1 */
+    /* CAN1 RX0 is not enabled in the .ioc NVIC tab, so it is set up by hand
+     * here. Priority 6 is deliberately one step below TIM2's 5: the step-pulse
+     * interrupt can therefore never be delayed by a CAN interrupt, while 6 is
+     * still numerically at or above configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY
+     * (5), which is what makes it legal for the handler to call the ...FromISR
+     * API.
+     *
+     * If you later enable CAN1 RX0 in the .ioc, delete this block and the
+     * handler in stm32f4xx_it.c - CubeMX generates both, and keeping either
+     * copy alongside the generated one is a duplicate definition. */
+    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
+    /* USER CODE END CAN1_MspInit 1 */
+
+  }
+
+}
+
+/**
+  * @brief CAN MSP De-Initialization
+  * This function freeze the hardware resources used in this example
+  * @param hcan: CAN handle pointer
+  * @retval None
+  */
+void HAL_CAN_MspDeInit(CAN_HandleTypeDef* hcan)
+{
+  if(hcan->Instance==CAN1)
+  {
+    /* USER CODE BEGIN CAN1_MspDeInit 0 */
+
+    /* USER CODE END CAN1_MspDeInit 0 */
+    /* Peripheral clock disable */
+    __HAL_RCC_CAN1_CLK_DISABLE();
+
+    /**CAN1 GPIO Configuration
+    PB8     ------> CAN1_RX
+    PB9     ------> CAN1_TX
+    */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_8|GPIO_PIN_9);
+
+    /* USER CODE BEGIN CAN1_MspDeInit 1 */
+
+    /* USER CODE END CAN1_MspDeInit 1 */
+  }
+
+}
+
+/**
   * @brief TIM_Base MSP Initialization
   * This function configures the hardware resources used in this example
   * @param htim_base: TIM_Base handle pointer

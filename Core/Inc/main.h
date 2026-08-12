@@ -56,6 +56,30 @@ void Error_Handler(void);
 #define RESET_CAUSE_STACK_OVERFLOW 1u
 #define RESET_CAUSE_MALLOC_FAILED  2u
 #define RESET_CAUSE_HARDFAULT      3u
+
+/* Diagnostic only: manually drain FIFO0 with HAL_CAN_GetRxMessage(), bypassing
+ * HAL_CAN_IRQHandler(), the application callback, and all RTOS queue code. Set
+ * to 0 after completing the staged CAN receive-path tests. */
+#define CAN_RX_IRQ_ISOLATION_TEST 0
+
+/* Stage reached after a CAN frame has been parsed:
+ *   1 = construct ControllerCommand, then return before QueueCommand()
+ *   2 = construct it and call the test sink inside QueueCommand()
+ * Keep the IRQ isolation test enabled while using either stage. */
+#define CAN_COMMAND_PATH_TEST_STAGE 2
+
+extern volatile uint32_t can_rx_isolation_irq_count;
+extern volatile uint32_t can_rx_isolation_read_count;
+extern volatile uint32_t can_rx_isolation_error_count;
+extern volatile uint32_t can_rx_isolation_queue_put_count;
+extern volatile uint32_t can_rx_isolation_queue_get_count;
+extern volatile uint32_t can_rx_isolation_queue_error_count;
+extern volatile uint32_t can_rx_isolation_parse_count;
+extern volatile uint32_t can_rx_isolation_command_count;
+extern volatile uint32_t can_rx_isolation_queue_command_count;
+extern volatile uint32_t can_rx_isolation_call_before_count;
+extern volatile uint32_t can_rx_isolation_call_entry_count;
+extern volatile uint32_t can_rx_isolation_call_after_count;
 void RecordResetCauseAndReboot(uint32_t cause, const char *name);
 /* USER CODE END EFP */
 

@@ -27,8 +27,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
 #include "FreeRTOS.h"
+#include "queue.h"
 #include "stream_buffer.h"
 /* USER CODE END Includes */
 
@@ -78,14 +80,28 @@ typedef enum {
     TRANSPORT_CAN = 1
 } TransportType;
 
+/* `speed` is signed: for a jog its sign is the direction of travel, and for a
+ * position move only its magnitude is used (direction comes from target versus
+ * current position). Both fields are 32-bit all the way to the motor task, which
+ * matters for `target` - one revolution of a 200-step motor at 256 microsteps is
+ * already 51200 steps, so a 16-bit position cannot express even a single turn. */
 typedef struct {
     TransportType source;
     CommandType type;
     uint8_t motor_id;
     int32_t target;
-    uint32_t speed;
+    int32_t speed;
     uint32_t flags;
 } ControllerCommand;
+
+/* One received CAN frame, as handed from the RX interrupt to canCommand. The
+ * HAL's CAN_RxHeaderTypeDef is not used here because it is ~24 bytes of mostly
+ * filter/timestamp metadata we discard, and this queue is copied per frame. */
+typedef struct {
+    uint32_t id;
+    uint8_t dlc;
+    uint8_t data[8];
+} CanFrame;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -110,7 +126,140 @@ typedef struct {
 #define RAMP_ACCUMULATOR_THRESHOLD 50
 
 #define USE_USB_COMMANDS 1
-#define USE_CAN_COMMANDS 0
+/* Gates the CAN receive path. With this at 0 the filter is never configured and
+ * HAL_CAN_Start is never called, so no frame can reach canCommand and no
+ * telemetry is published - the tasks exist but stay idle. */
+#define USE_CAN_COMMANDS 1
+
+/* CAN control interface, using the FIRST/FRC addressing scheme. Identifiers are
+ * 29-bit extended, partitioned into five fields:
+ *
+ *   bits 28:24  device type   (5 bits)
+ *   bits 23:16  manufacturer  (8 bits)
+ *   bits 15:10  API class     (6 bits)  \ together the 10-bit
+ *   bits  9:6   API index     (4 bits)  / API/message identifier
+ *   bits  5:0   device number (6 bits)
+ *
+ * Each motor is its own FRC device: the device number carries the motor id, so a
+ * frame addresses exactly one motor and the entire 8-byte payload is free for a
+ * 32-bit position and a 32-bit speed. That is how a Talon or SparkMax presents
+ * itself, and it means an off-the-shelf FRC tool sees eight motors rather than
+ * one opaque board.
+ *
+ * Every command therefore carries the same payload:
+ *
+ *   bytes 0:3  int32 target, little-endian
+ *   bytes 4:7  int32 speed,  little-endian
+ *
+ * Commands that need only one of the two ignore the other, and commands that need
+ * neither ignore the payload entirely. */
+#define FRC_MAKE_ID(type, mfr, api, dev) \
+    (((uint32_t)(type) << 24) | ((uint32_t)(mfr) << 16) | \
+     ((uint32_t)(api) << 6) | (uint32_t)(dev))
+
+#define FRC_DEVICE_TYPE(id)   (((id) >> 24) & 0x1Fu)
+#define FRC_MANUFACTURER(id)  (((id) >> 16) & 0xFFu)
+#define FRC_API_ID(id)        (((id) >> 6) & 0x3FFu)
+#define FRC_API_CLASS(id)     (((id) >> 10) & 0x3Fu)
+#define FRC_API_INDEX(id)     (((id) >> 6) & 0x0Fu)
+#define FRC_DEVICE_NUMBER(id) ((id) & 0x3Fu)
+
+/* Table 1 - CAN Device Types, and Table 2 - CAN Manufacturer Codes. */
+#define FRC_DEVICE_TYPE_BROADCAST        0u
+#define FRC_DEVICE_TYPE_MOTOR_CONTROLLER 2u
+#define FRC_MANUFACTURER_BROADCAST       0u
+#define FRC_MANUFACTURER_TEAM_USE        8u
+
+/* This board's identity on the bus. It claims a block of eight consecutive device
+ * numbers, one per motor, starting at CAN_MOTOR_ID_BASE: motor n answers to
+ * device number CAN_MOTOR_ID_BASE + n.
+ *
+ * The base must be a multiple of 8 so that one hardware filter mask can accept
+ * the whole block (see CAN_FILTER_MASK_MOTORS), which is what lets several of
+ * these boards share a bus at bases 0, 8, 16 and so on. Base 0 is the FRC default.
+ *
+ * Device number 0x3F is reserved by the spec for device-specific broadcasts and is
+ * also accepted, addressing every motor on the board at once. It is the block's
+ * upper bound: a base of 56 would collide with it, so the last usable base is 48. */
+#define CAN_DEVICE_TYPE   FRC_DEVICE_TYPE_MOTOR_CONTROLLER
+#define CAN_MANUFACTURER  FRC_MANUFACTURER_TEAM_USE
+#define CAN_MOTOR_ID_BASE 0u
+#define FRC_DEVICE_NUMBER_BROADCAST 0x3Fu
+
+/* Fixed payload layout shared by every command. */
+#define CAN_PAYLOAD_LEN           8
+#define CAN_PAYLOAD_TARGET_OFFSET 0
+#define CAN_PAYLOAD_SPEED_OFFSET  4
+
+/* API identifiers, as (class << 4) | index. Class numbering follows the
+ * convention in the FRC motor-controller example so the device reads sensibly
+ * to anyone familiar with the spec: 1 = speed control, 3 = position control,
+ * 5 = status, 6 = periodic status. Class 0 holds the stop/disable controls.
+ *
+ * Lower identifiers win CAN arbitration, and because the API identifier sits
+ * above the device number, this ordering means a stop beats motion traffic on a
+ * saturated bus. */
+#define CAN_API_STOP         0x000u /* class 0 index 0. Payload ignored */
+#define CAN_API_DISABLE      0x001u /* class 0 index 1. Payload ignored */
+#define CAN_API_SET_SPEED    0x010u /* class 1 index 0. Uses speed; target ignored */
+#define CAN_API_MOVE_ABS     0x030u /* class 3 index 0. Uses target and speed */
+#define CAN_API_MOVE_REL     0x031u /* class 3 index 1. Uses target and speed */
+#define CAN_API_STATUS       0x050u /* class 5 index 0. Payload ignored */
+#define CAN_API_ENCODER_REQ  0x051u /* class 5 index 1. Payload ignored, board-level */
+#define CAN_API_TLM_ENCODERS 0x060u /* class 6 index 0. DLC 8: 4 x u16 ADC counts */
+/* Class 6 index 1 onward is reserved for per-motor status frames, which would
+ * mirror the command payload: int32 position then int32 speed. */
+
+/* Broadcast messages carry device type 0, manufacturer 0 and API class 0, so the
+ * message number is the API index and Disable is arbitration ID 0x00000000 -
+ * the lowest possible identifier, i.e. the highest priority frame on the bus.
+ * The spec requires devices to disable immediately on this message. */
+#define FRC_BCAST_DISABLE        0u
+#define FRC_BCAST_SYSTEM_HALT    1u
+#define FRC_BCAST_SYSTEM_RESET   2u
+#define FRC_BCAST_DEVICE_ASSIGN  3u
+#define FRC_BCAST_DEVICE_QUERY   4u
+#define FRC_BCAST_HEARTBEAT      5u
+#define FRC_BCAST_SYNC           6u
+#define FRC_BCAST_UPDATE         7u
+#define FRC_BCAST_FIRMWARE_VER   8u
+#define FRC_BCAST_ENUMERATE      9u
+#define FRC_BCAST_SYSTEM_RESUME 10u
+
+/* Encoder telemetry covers all four steer channels in one frame, so it belongs to
+ * the board rather than to any single motor. It goes out on the base device
+ * number - motor 0's address - because a board-level frame still needs a device
+ * number and that is the one that identifies this board's block. */
+#define CAN_TX_ID_ENCODERS \
+    FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, CAN_API_TLM_ENCODERS, CAN_MOTOR_ID_BASE)
+
+/* Receive filters, as {id, mask} pairs over the 29-bit identifier. A 1 in the
+ * mask means the bit must match.
+ *   0x1FFF0038 - device type + manufacturer + the top 3 bits of the device
+ *                number, leaving the low 3 free: one bank accepts this board's
+ *                whole aligned block of eight motors, any API identifier.
+ *   0x1FFF003F - one exact device number, used for the all-motors address.
+ *   0x1FFFFC00 - device type + manufacturer + API class, i.e. the whole
+ *                broadcast class 0 regardless of message or device number. */
+#define CAN_FILTER_MASK_MOTORS    0x1FFF0038u
+#define CAN_FILTER_MASK_DEVICE    0x1FFF003Fu
+#define CAN_FILTER_MASK_BROADCAST 0x1FFFFC00u
+
+/* Frames buffered between the RX interrupt and canCommand. Eight is generous:
+ * the hardware FIFO only holds three, and canCommand runs above every other
+ * command producer so it drains the queue inside the put that filled it. */
+#define CAN_RX_QUEUE_DEPTH 8
+
+/* Encoder publish rate; 0 disables periodic publishing and leaves only the
+ * on-request CAN_API_ENCODER_REQ path. At 100 Hz one 8-byte frame costs roughly
+ * 135us of bus time per second (~1.4% of a 1 Mbit/s bus) and a few register
+ * writes of CPU. That is orders of magnitude cheaper than publishing the same
+ * data as a log line, which costs a vsnprintf, a 160-byte queue copy, and a
+ * USB write that busy-waits up to 50ms. */
+#define CAN_TLM_INTERVAL_MS 10
+
+/* Set by canCommand to ask canTelemetry for an immediate extra publish. */
+#define CAN_TLM_FLAG_PUBLISH 0x01u
 
 #define USB_LINE_MAX 256
 /* The CDC OUT endpoint is re-armed unconditionally in CDC_Receive_FS, so this
@@ -123,18 +272,13 @@ typedef struct {
 
 #define NUM_ENCODERS 4
 #define ENCODER_CHANNEL_OFFSET 4
-#define INF  0x7FFF
-#define NINF 0x8000
 
-#define CMD_TYPE_BITS 4
-#define CMD_SPEED_BITS 8
-#define CMD_DIR_BITS 1
-#define CMD_TARGET_BITS 16
-
-#define CMD_TYPE_MASK 0xF
-#define CMD_SPEED_MASK 0xFF
-#define CMD_DIR_MASK 0x1
-#define CMD_TARGET_MASK 0xFFFF
+/* Sentinel targets for jog commands, which run until countermanded. The step
+ * generator stops a motor when target == position, so "forever" just means far
+ * enough away that it never gets there: at the 5000 steps/s ceiling, 2.1e9 steps
+ * is about five days of continuous running. The sign selects direction. */
+#define TARGET_FOREVER_POS INT32_MAX
+#define TARGET_FOREVER_NEG INT32_MIN
 
 /* Deferred logging. A USB CDC write costs ~1ms (bulk IN transfers are scheduled
  * on 1ms frame boundaries) and _write busy-waits up to 50ms when the endpoint is
@@ -147,13 +291,15 @@ typedef struct {
 #define LOG_QUEUE_DEPTH 32
 #define DIAG_INTERVAL_MS 1000
 
+#define LOG_LEVEL 1
+
 /* Per-command trace ("Parsing Command", "OK QUEUED ..."). An 8-motor batch
  * emits 10 such lines and each one is a separate ~1ms USB write, so above a few
  * command lines per second the log queue overflows. Dropped log records look
  * exactly like dropped commands from the host's point of view, which is why
  * this is off by default; errors, batch summaries and the periodic counters
  * below are always logged and are the reliable signal. */
-#define CMD_LOG_VERBOSE 0
+#define CMD_LOG_VERBOSE 1
 
 #if CMD_LOG_VERBOSE
 #define LogTrace(...) LogDeferred(__VA_ARGS__)
@@ -176,6 +322,8 @@ typedef struct {
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+CAN_HandleTypeDef hcan1;
+
 TIM_HandleTypeDef htim2;
 
 /* Definitions for commandSchedule */
@@ -195,21 +343,9 @@ const osThreadAttr_t motorController_attributes = {
 /* Definitions for logger */
 osThreadId_t loggerHandle;
 const osThreadAttr_t logger_attributes = {
-  /* Stack raised from 256 words: this task now also holds a LOG_MSG_MAX drain
-   * buffer on top of newlib's vfprintf frame. */
   .name = "logger",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
-};
-/* Definitions for outputWriter */
-osThreadId_t outputWriterHandle;
-const osThreadAttr_t outputWriter_attributes = {
-  /* The only task permitted to write to stdout. It sits above the logger so
-   * that a command acknowledgement preempts the logger's multi-second TMC5160
-   * register reads, and below usbCommand so it can never delay parsing. */
-  .name = "outputWriter",
-  .stack_size = 384 * 4,
-  .priority = (osPriority_t) osPriorityLow7,
 };
 /* Definitions for usbCommand */
 osThreadId_t usbCommandHandle;
@@ -217,6 +353,27 @@ const osThreadAttr_t usbCommand_attributes = {
   .name = "usbCommand",
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for outputWriter */
+osThreadId_t outputWriterHandle;
+const osThreadAttr_t outputWriter_attributes = {
+  .name = "outputWriter",
+  .stack_size = 384 * 4,
+  .priority = (osPriority_t) osPriorityLow7,
+};
+/* Definitions for canCommand */
+osThreadId_t canCommandHandle;
+const osThreadAttr_t canCommand_attributes = {
+  .name = "canCommand",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal2,
+};
+/* Definitions for canTelemetry */
+osThreadId_t canTelemetryHandle;
+const osThreadAttr_t canTelemetry_attributes = {
+  .name = "canTelemetry",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal1,
 };
 /* USER CODE BEGIN PV */
 StepperMotor steppers[NUM_STEPPERS];
@@ -226,6 +383,20 @@ StreamBufferHandle_t usbRxStream;
 StreamBufferHandle_t usbTxStream;
 osMessageQueueId_t schedulerCommandQueue;
 osMessageQueueId_t logQueue;
+osMessageQueueId_t canRxQueue;
+
+/* One depth-1 mailbox per motor, written with xQueueOverwrite. This replaces a
+ * packed 32-bit task notification that could only carry a 16-bit target and an
+ * 8-bit speed; the full ControllerCommand goes through instead, so the wire
+ * format's 32-bit fields are honoured rather than silently truncated.
+ *
+ * Depth 1 with overwrite reproduces the old eSetValueWithOverwrite behaviour
+ * exactly: a command arriving before the motor task has read the previous one
+ * replaces it instead of queueing, so a motor always acts on the newest target
+ * rather than working through a backlog of stale ones. Unlike a hand-rolled
+ * shared struct it is also tear-free, which matters because the writer runs at a
+ * higher priority than the reader and can preempt it mid-copy. */
+QueueHandle_t motorCommandQueue[NUM_STEPPERS];
 volatile uint32_t usb_rx_callback_count = 0;
 volatile uint32_t usb_rx_byte_count = 0;
 volatile uint32_t usb_rx_drop_count = 0;
@@ -235,11 +406,45 @@ volatile uint32_t cmd_invalid_count = 0;
 volatile uint32_t cmd_queue_drop_count = 0;
 volatile uint32_t cmd_queue_peak = 0;
 
-/* Notifications handed to each motor task vs. notifications it actually woke up
- * for. xTaskNotify uses eSetValueWithOverwrite, so a second command arriving
- * before the motor task runs silently replaces the first; a persistent gap
- * between these two totals is that coalescing, and it is invisible otherwise.
- * Each slot has exactly one writer, so no atomics are needed. */
+/* CAN command-path accounting, mirroring the USB counters above so a lost
+ * command can be attributed to a stage rather than guessed at:
+ *   rx_frame  - frames accepted by the filter and pulled out of FIFO0.
+ *   rx_qdrop  - frames the ISR could not fit into canRxQueue. A definite loss.
+ *   rx_invalid- unknown API identifier, bad DLC, bad motor id, or a standard-ID
+ *               or remote frame that a misconfigured filter let through.
+ *   queued    - per-motor commands successfully handed to the scheduler.
+ *   tx_drop   - telemetry frames dropped because all mailboxes were busy.
+ *   bcast     - FRC broadcast messages seen, handled or not.
+ *   disable   - Disable/System Halt broadcasts acted on. A climbing count while
+ *               motion is expected means something on the bus is holding the
+ *               board disabled. */
+volatile uint32_t can_rx_frame_count = 0;
+/* Incremented by the CAN RX IRQ isolation path in stm32f4xx_it.c. This is the
+ * storage definition; main.h exposes it to the interrupt translation unit. */
+volatile uint32_t can_rx_isolation_irq_count = 0;
+volatile uint32_t can_rx_isolation_read_count = 0;
+volatile uint32_t can_rx_isolation_error_count = 0;
+volatile uint32_t can_rx_isolation_queue_put_count = 0;
+volatile uint32_t can_rx_isolation_queue_get_count = 0;
+volatile uint32_t can_rx_isolation_queue_error_count = 0;
+volatile uint32_t can_rx_isolation_parse_count = 0;
+volatile uint32_t can_rx_isolation_command_count = 0;
+volatile uint32_t can_rx_isolation_queue_command_count = 0;
+volatile uint32_t can_rx_isolation_call_before_count = 0;
+volatile uint32_t can_rx_isolation_call_entry_count = 0;
+volatile uint32_t can_rx_isolation_call_after_count = 0;
+volatile uint32_t can_rx_queue_drop_count = 0;
+volatile uint32_t can_rx_invalid_count = 0;
+volatile uint32_t can_cmd_queued_count = 0;
+volatile uint32_t can_tx_drop_count = 0;
+volatile uint32_t can_broadcast_count = 0;
+volatile uint32_t can_disable_count = 0;
+
+/* Commands handed to each motor task vs. commands it actually woke up for.
+ * xQueueOverwrite replaces an unread command rather than queueing it, so a
+ * persistent gap between these two totals is that coalescing, and it is
+ * invisible otherwise. Each slot has exactly one writer, so no atomics are
+ * needed. */
 volatile uint32_t notify_sent[NUM_STEPPERS];
 volatile uint32_t notify_recv[NUM_STEPPERS];
 
@@ -263,11 +468,14 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_CAN1_Init(void);
 void StartTask1(void *argument);
 void StartTask2(void *argument);
 void StartTask03(void *argument);
 void StartTask04(void *argument);
 void StartTask05(void *argument);
+void StartTask06(void *argument);
+void StartTask07(void *argument);
 
 /* USER CODE BEGIN PFP */
 extern bool ConfigureSPIControllers(void);
@@ -634,6 +842,28 @@ static void LogDeferred(const char *fmt, ...)
  */
 static osStatus_t QueueCommand(const ControllerCommand *cmd)
 {
+#if CAN_RX_IRQ_ISOLATION_TEST && (CAN_COMMAND_PATH_TEST_STAGE == 2)
+    /* Stage 5 isolation sink: the real ControllerCommand was constructed and
+     * passed down the call chain. Inspect its fields without touching the
+     * scheduler queue yet. */
+    can_rx_isolation_call_entry_count++;
+    if (cmd == NULL || cmd->source != TRANSPORT_CAN ||
+        cmd->motor_id >= NUM_STEPPERS)
+    {
+        return osErrorParameter;
+    }
+    can_rx_isolation_queue_command_count++;
+    return osOK;
+#endif
+
+	LogTrace(
+	    "Command Issued: motor_id=%u type=%d target=%ld speed=%ld\r\n",
+	    (unsigned)cmd->motor_id,
+	    (int)cmd->type,
+	    (long)cmd->target,
+	    (long)cmd->speed
+	);
+
     osStatus_t status = osMessageQueuePut(schedulerCommandQueue, cmd, 0, 0);
 
     if (status != osOK)
@@ -762,7 +992,9 @@ void HandleUsbCommand(const char *line)
             cmd.source = TRANSPORT_USB;
             cmd.type = CMD_SET_SPEED;
             cmd.motor_id = id;
-            cmd.target = spd < 0 ? NINF : INF;
+            /* No target for a jog: the motor task derives both the direction and
+             * the run-forever sentinel from the sign of the speed. */
+            cmd.target = 0;
             cmd.speed = spd;
             osStatus_t status = QueueCommand(&cmd);
             if (status == osOK) {
@@ -878,64 +1110,348 @@ void HandleUsbCommand(const char *line)
     LogDeferred("Invalid Command Received.\r\n");
 }
 
+_Static_assert(NUM_ENCODERS * 2 <= 8,
+               "encoder telemetry must fit one 8-byte CAN frame");
 
-/**
-  * @brief  Returns a uint32_t command for montor controller task notifications.
-  *
-  *
-  * @param  target the target position to move stepper.
-  * @param  dir the sign of the speed.
-  *          This parameter can be one of GPIO_PIN_x where x can be (0..15).
-  * @param  speed the speed for the command.
-  * @retval uint32_t command.
-  */
-uint32_t encodeCommand(int16_t target, uint8_t dir, uint8_t speed, CommandType cmd){
-	return (((((target << CMD_DIR_BITS) + (dir & CMD_DIR_MASK)) << CMD_SPEED_BITS) + speed) << CMD_TYPE_BITS) + cmd;
+/* One filter mask covers an aligned block of eight device numbers, so the motor
+ * block must be 8-aligned and must not run into the all-motors address 0x3F.
+ * Together these limit the base to 0, 8, 16, 24, 32, 40 or 48. */
+_Static_assert(NUM_STEPPERS <= 8,
+               "one receive filter mask covers at most eight device numbers");
+_Static_assert((CAN_MOTOR_ID_BASE % 8u) == 0u,
+               "motor id base must be 8-aligned for the receive filter mask");
+_Static_assert(CAN_MOTOR_ID_BASE + 8u <= FRC_DEVICE_NUMBER_BROADCAST,
+               "motor id block must not reach the all-motors number 0x3F");
+
+/*
+ * Queue one command for one motor. Every CAN handler below funnels through here
+ * so validation, counting and error reporting are identical across command types.
+ */
+static void CanQueueMotorCommand(
+    CommandType type,
+    uint8_t motor_id,
+    int32_t target,
+    int32_t speed)
+{
+    if (motor_id >= NUM_STEPPERS)
+    {
+        can_rx_invalid_count++;
+        LogDeferred("ERR CAN BAD MOTOR ID %u\r\n", (unsigned)motor_id);
+        return;
+    }
+
+#if CAN_RX_IRQ_ISOLATION_TEST
+    /* HandleCanFrame successfully decoded and validated a motor command. The
+     * deeper test sink is now inside QueueCommand(). */
+    can_rx_isolation_command_count++;
+#endif
+
+    ControllerCommand cmd = {0};
+    cmd.source = TRANSPORT_CAN;
+    cmd.type = type;
+    cmd.motor_id = motor_id;
+    cmd.target = target;
+    cmd.speed = speed;
+
+#if CAN_RX_IRQ_ISOLATION_TEST && (CAN_COMMAND_PATH_TEST_STAGE == 1)
+    /* Stage 5A: prove that constructing and populating the complete command is
+     * safe. Volatile reads force the compiler to materialize every field before
+     * returning, without entering QueueCommand(). */
+    volatile uint32_t command_signature =
+        (uint32_t)cmd.source ^ (uint32_t)cmd.type ^
+        (uint32_t)cmd.motor_id ^ (uint32_t)cmd.target ^
+        (uint32_t)cmd.speed;
+    (void)command_signature;
+    can_rx_isolation_queue_command_count++;
+    return;
+#endif
+
+#if CAN_RX_IRQ_ISOLATION_TEST
+    can_rx_isolation_call_before_count++;
+#endif
+    osStatus_t status = QueueCommand(&cmd);
+#if CAN_RX_IRQ_ISOLATION_TEST
+    can_rx_isolation_call_after_count++;
+#endif
+    if (status == osOK)
+    {
+        can_cmd_queued_count++;
+        LogTrace("OK QUEUED CAN cmd=%d motor=%u\r\n", (int)type, (unsigned)motor_id);
+    }
+    else
+    {
+        LogDeferred("ERR CAN QUEUE PUT FAILED status=%d motor=%u\r\n",
+                    (int)status, (unsigned)motor_id);
+    }
 }
 
-int16_t decodeSpeed(uint32_t input) {
-	int dir = (input >> (CMD_SPEED_BITS + CMD_TYPE_BITS)) & CMD_DIR_MASK ? 1 : -1;
-	return (dir * -1) * ((input >> CMD_TYPE_BITS) & CMD_SPEED_MASK);
+static void CanReportBadFrame(const CanFrame *frame, const char *reason)
+{
+    can_rx_invalid_count++;
+    /* The raw identifier is printed alongside the decoded API identifier because
+     * the raw form is what a bus trace shows, and the API identifier is what the
+     * protocol document lists. */
+    LogDeferred("ERR CAN %s id=0x%08lX api=0x%03lX dlc=%u\r\n",
+                reason, (unsigned long)frame->id,
+                (unsigned long)FRC_API_ID(frame->id), (unsigned)frame->dlc);
 }
 
-CommandType decodeCommand(uint32_t input) {
-	return input & CMD_TYPE_MASK;
+static int32_t CanReadInt32(const uint8_t *bytes)
+{
+    /* Assembled byte by byte rather than by casting the buffer to an int32_t*.
+     * CanFrame puts `data` at offset 5, so neither field is 4-byte aligned, and a
+     * byte-wise read also states the wire's little-endian order outright instead
+     * of inheriting it from the host. */
+    return (int32_t)((uint32_t)bytes[0] |
+                     ((uint32_t)bytes[1] << 8) |
+                     ((uint32_t)bytes[2] << 16) |
+                     ((uint32_t)bytes[3] << 24));
 }
 
-int16_t decodeTarget(uint32_t input) {
-	return (input >> (CMD_DIR_BITS + CMD_SPEED_BITS + CMD_TYPE_BITS)) & CMD_TARGET_MASK;
+/*
+ * Map an API identifier to an internal command, reporting whether the command
+ * reads the payload at all. Split out so HandleCanFrame can reject an unknown
+ * identifier before doing any payload validation.
+ */
+static bool CanCommandForApi(uint32_t api, CommandType *type, bool *needs_payload)
+{
+    switch (api)
+    {
+        case CAN_API_STOP:      *type = CMD_STOP;      *needs_payload = false; return true;
+        case CAN_API_DISABLE:   *type = CMD_DISABLE;   *needs_payload = false; return true;
+        case CAN_API_STATUS:    *type = CMD_STATUS;    *needs_payload = false; return true;
+        case CAN_API_SET_SPEED: *type = CMD_SET_SPEED; *needs_payload = true;  return true;
+        case CAN_API_MOVE_ABS:  *type = CMD_MOVE_ABS;  *needs_payload = true;  return true;
+        case CAN_API_MOVE_REL:  *type = CMD_MOVE_REL;  *needs_payload = true;  return true;
+        default: return false;
+    }
 }
+
+/*
+ * Publish the encoder channels as one frame of little-endian raw ADC counts.
+ * Raw counts rather than degrees so the client owns the scaling and this stays a
+ * handful of register writes: no formatting, no allocation, and nothing that can
+ * block the command path.
+ */
+static void CanPublishEncoders(void)
+{
+    CAN_TxHeaderTypeDef header = {
+        .StdId = 0,
+        .ExtId = CAN_TX_ID_ENCODERS,
+        .IDE = CAN_ID_EXT,
+        .RTR = CAN_RTR_DATA,
+        .DLC = NUM_ENCODERS * 2,
+        .TransmitGlobalTime = DISABLE,
+    };
+
+    uint8_t payload[NUM_ENCODERS * 2];
+    for (int i = 0; i < NUM_ENCODERS; i++)
+    {
+        uint16_t raw = encoder_adc[i];
+        payload[i * 2] = (uint8_t)(raw & 0xFFu);
+        payload[i * 2 + 1] = (uint8_t)(raw >> 8);
+    }
+
+    uint32_t mailbox;
+    if (HAL_CAN_AddTxMessage(&hcan1, &header, payload, &mailbox) != HAL_OK)
+    {
+        /* All three mailboxes busy, or the peripheral is bus-off. Telemetry is
+         * expendable, so drop it and let the counter show the rate - the same
+         * bargain the log queue makes. Retrying here would put bus health on the
+         * critical path of a task that sits just below command handling. */
+        can_tx_drop_count++;
+    }
+}
+
+/*
+ * Kill all motion right now, without going through any queue.
+ *
+ * The FRC spec requires a device to disable *immediately* on the Disable
+ * broadcast, and the normal command path is four hops deep (RX queue ->
+ * canCommand -> scheduler queue -> commandSchedule -> motor task) with a
+ * bounded queue at each stage that is allowed to drop under pressure. Neither
+ * the latency nor the possibility of a drop is acceptable for this message, so
+ * it is applied directly here and is safe to call from the RX interrupt.
+ *
+ * `enabled` is cleared before anything else because that is the flag the TIM2
+ * step generator checks first: once it is 0 that motor emits no more pulses, so
+ * nothing the rest of the loop does can produce movement even if TIM2 (which
+ * runs at a higher interrupt priority and can preempt this) fires part-way
+ * through.
+ */
+static void CanDisableAllMotors(void)
+{
+    for (int i = 0; i < NUM_STEPPERS; i++)
+    {
+        steppers[i].enabled = 0;
+
+        HAL_GPIO_WritePin(motorCtx[i].enable_port,
+                          motorCtx[i].enable_pin,
+                          !motorCtx[i].enable_active_state);
+
+        /* A motor interrupted between the two halves of a step pulse would
+         * otherwise leave STEP asserted for as long as the board stays disabled,
+         * because clearing `enabled` above stops TIM2 reaching the code that
+         * lowers it. */
+        steppers[i].step_port->BSRR = (uint32_t)steppers[i].step_pin << 16;
+        steppers[i].step_high = 0;
+
+        steppers[i].speed = 0;
+        steppers[i].commanded_speed = 0;
+        steppers[i].target = steppers[i].position;
+    }
+}
+
+/*
+ * Dispatch one received frame. Runs in the canCommand task rather than the RX
+ * interrupt so that parsing and error logging (LogDeferred calls vsnprintf and
+ * is not ISR-safe) stay out of interrupt context. Broadcast frames never reach
+ * here - they are handled in the interrupt itself.
+ *
+ * The device type and manufacturer were already matched by the hardware filter,
+ * so only the API identifier and the device number are examined here.
+ */
+static void HandleCanFrame(const CanFrame *frame)
+{
+    uint32_t api = FRC_API_ID(frame->id);
+    uint32_t device = FRC_DEVICE_NUMBER(frame->id);
+
+    /* Board-level identifiers, which are not addressed to a motor. */
+    if (api == CAN_API_ENCODER_REQ)
+    {
+        /* Delegated to canTelemetry rather than transmitted here so that every
+         * HAL_CAN_AddTxMessage call comes from one task: it claims a mailbox with
+         * a non-atomic read-then-write, and canCommand runs above canTelemetry so
+         * it could preempt a publish in progress. */
+        osThreadFlagsSet(canTelemetryHandle, CAN_TLM_FLAG_PUBLISH);
+        return;
+    }
+    if (api == CAN_API_TLM_ENCODERS)
+    {
+        /* Our own telemetry identifier matches our receive filter, so it comes
+         * back to us in the loopback modes used for bench testing. Ignored rather
+         * than reported, so loopback stays quiet. */
+        return;
+    }
+
+    CommandType type;
+    bool needs_payload;
+    if (!CanCommandForApi(api, &type, &needs_payload))
+    {
+        CanReportBadFrame(frame, "UNKNOWN API");
+        return;
+    }
+
+    int32_t target = 0;
+    int32_t speed = 0;
+
+    if (needs_payload)
+    {
+        /* Exactly 8 bytes, never fewer. Zero-filling a short frame would silently
+         * turn a truncated command into a valid-looking one - a move to 0 at
+         * default speed - which is worse than rejecting it. */
+        if (frame->dlc != CAN_PAYLOAD_LEN)
+        {
+            CanReportBadFrame(frame, "BAD DLC");
+            return;
+        }
+
+        target = CanReadInt32(&frame->data[CAN_PAYLOAD_TARGET_OFFSET]);
+        speed = CanReadInt32(&frame->data[CAN_PAYLOAD_SPEED_OFFSET]);
+
+        /* The speed field is far wider than the achievable range, so an
+         * out-of-range value is much more likely to be a byte-order or units
+         * mistake than a real request. Reported rather than clamped, so it shows
+         * up during bring-up instead of quietly running at the ceiling. */
+        if (speed > MAX_SPEED || speed < -MAX_SPEED)
+        {
+            CanReportBadFrame(frame, "SPEED OUT OF RANGE");
+            return;
+        }
+    }
+
+    /* 0x3F addresses every motor on the board at once, so an all-stop is still a
+     * single frame even though a command now names one motor. */
+    if (device == FRC_DEVICE_NUMBER_BROADCAST)
+    {
+        for (uint8_t id = 0; id < NUM_STEPPERS; id++)
+        {
+            CanQueueMotorCommand(type, id, target, speed);
+        }
+        return;
+    }
+
+    /* Unsigned subtraction on purpose: a device number below the base wraps to a
+     * huge value and fails the same bounds check, so one comparison covers both
+     * ends. The filter should already have excluded anything outside the block -
+     * this catches a misconfigured filter, and the tail of the block when
+     * NUM_STEPPERS is less than 8. */
+    uint32_t motor = device - CAN_MOTOR_ID_BASE;
+    if (motor >= (uint32_t)NUM_STEPPERS)
+    {
+        CanReportBadFrame(frame, "BAD DEVICE NUMBER");
+        return;
+    }
+
+    CanQueueMotorCommand(type, (uint8_t)motor, target, speed);
+}
+
 
 static void MotorController_HandlePosMove(
 	MotorControllerContext *context,
 	StepperMotor *stepper,
-	uint32_t ulNotifiedValue,
-	CommandType command,
+	const ControllerCommand *cmd,
 	bool relative)
 {
-	int32_t target = decodeTarget(ulNotifiedValue);
+	int32_t target = cmd->target;
+
 	if (relative) {
-		target += stepper->position;
-	}
-	stepper->target = target;
-	stepper->mode = (command == CMD_SET_SPEED) ? MODE_SPEED : MODE_POS;
-	stepper->ramp_accumulator = 0;
-	if(command == CMD_SET_SPEED) {
-		stepper->target *= 0xFFFF;
+		/* Widened to 64-bit for the addition only. A relative move is now free to
+		 * ask for a full int32 offset, so adding it to a position that is itself
+		 * near the limit would otherwise wrap and send the motor the wrong way. */
+		int64_t absolute = (int64_t)target + (int64_t)stepper->position;
+		if (absolute > INT32_MAX) {
+			absolute = INT32_MAX;
+		} else if (absolute < INT32_MIN) {
+			absolute = INT32_MIN;
+		}
+		target = (int32_t)absolute;
 	}
 
-	uint8_t speed = decodeSpeed(ulNotifiedValue);
-	if (command == CMD_SET_SPEED && speed == 0) {
-		stepper->commanded_speed = 0;
-		stepper->target = stepper->position;
-	} else {
-		stepper->commanded_speed = speed == 0 ? DEFAULT_SPEED : abs(speed);
-		if (command != CMD_SET_SPEED) {
-			// Position moves snap straight to their commanded speed; only
-			// speed-mode commands ramp gradually (see HAL_TIM_PeriodElapsedCallback).
-			stepper->speed = stepper->commanded_speed;
-		}
+	/* Only the magnitude is used here: for a position move the direction is
+	 * implied by target versus position, and for a jog it is applied below by
+	 * choosing which sentinel to run toward.
+	 *
+	 * Negated in 64-bit because -INT32_MIN is undefined in 32-bit. The CAN path
+	 * rejects out-of-range speeds before this point, but a USB line can still
+	 * scan any int32, and this clamp is what makes that safe. */
+	int64_t requested = (cmd->speed < 0) ? -(int64_t)cmd->speed : (int64_t)cmd->speed;
+	if (requested > MAX_SPEED) {
+		requested = MAX_SPEED;
 	}
+	int32_t magnitude = (int32_t)requested;
+
+	stepper->mode = (cmd->type == CMD_SET_SPEED) ? MODE_SPEED : MODE_POS;
+	stepper->ramp_accumulator = 0;
+
+	if (cmd->type == CMD_SET_SPEED) {
+		if (magnitude == 0) {
+			/* Speed 0 is a stop request: park the target where the motor already
+			 * is so the step generator has nothing left to do. */
+			stepper->commanded_speed = 0;
+			target = stepper->position;
+		} else {
+			stepper->commanded_speed = (int16_t)magnitude;
+			target = (cmd->speed < 0) ? TARGET_FOREVER_NEG : TARGET_FOREVER_POS;
+		}
+	} else {
+		stepper->commanded_speed = (magnitude == 0) ? DEFAULT_SPEED : (int16_t)magnitude;
+		// Position moves snap straight to their commanded speed; only
+		// speed-mode commands ramp gradually (see HAL_TIM_PeriodElapsedCallback).
+		stepper->speed = stepper->commanded_speed;
+	}
+
+	stepper->target = target;
 	stepper->enabled = 1;
 	stepper->accumulator = 0;
 	HAL_GPIO_WritePin(context->enable_port, context->enable_pin, context->enable_active_state);
@@ -983,6 +1499,7 @@ int main(void)
   MX_DMA_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
+  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim2);
 
@@ -1025,6 +1542,79 @@ int main(void)
    * hardware and no conversion callback is implemented. Transfer-error and
    * direct-mode-error stay enabled so genuine faults are still caught. */
   __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_HT);
+
+#if USE_CAN_COMMANDS
+  /* MX_CAN1_Init only calls HAL_CAN_Init, which configures the bit timing and
+   * leaves the peripheral in initialisation mode. The filter, the start and the
+   * interrupt all still have to be set up here.
+   *
+   * ABOM (automatic bus-off recovery) is off in the .ioc, which would leave the
+   * controller permanently silent after the 32nd consecutive error - a control
+   * interface that dies quietly on a wiring fault. It is an
+   * initialisation-mode-only bit and HAL_CAN_Start is what leaves that mode, so
+   * this is the last opportunity to set it. */
+  SET_BIT(hcan1.Instance->MCR, CAN_MCR_ABOM);
+
+  /* Accept this board's own commands, the same commands sent to the reserved
+   * all-motors number, and the FRC broadcast class. Everything else on the bus
+   * - including the roboRIO heartbeat and other manufacturers' devices - is
+   * discarded in hardware at zero CPU cost. */
+  static const struct {
+      uint32_t id;
+      uint32_t mask;
+  } can_filters[] = {
+      { FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, 0, CAN_MOTOR_ID_BASE),
+        CAN_FILTER_MASK_MOTORS },
+      { FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, 0, FRC_DEVICE_NUMBER_BROADCAST),
+        CAN_FILTER_MASK_DEVICE },
+      { FRC_MAKE_ID(FRC_DEVICE_TYPE_BROADCAST, FRC_MANUFACTURER_BROADCAST, 0, 0),
+        CAN_FILTER_MASK_BROADCAST },
+  };
+
+  for (uint32_t i = 0; i < (sizeof(can_filters) / sizeof(can_filters[0])); i++)
+  {
+      /* In a 32-bit filter the identifier is left-aligned: EXID[28:0] occupies
+       * bits 31:3, then IDE (bit 2) and RTR (bit 1). CAN_ID_EXT and
+       * CAN_RTR_REMOTE are defined as exactly those bit values, so they double
+       * as the flags here. Putting both in the mask makes the hardware drop
+       * standard-ID and remote frames outright. */
+      uint32_t id = (can_filters[i].id << 3) | CAN_ID_EXT;
+      uint32_t mask = (can_filters[i].mask << 3) | CAN_ID_EXT | CAN_RTR_REMOTE;
+
+      CAN_FilterTypeDef can_filter = {
+          .FilterIdHigh = (uint16_t)(id >> 16),
+          .FilterIdLow = (uint16_t)(id & 0xFFFFu),
+          .FilterMaskIdHigh = (uint16_t)(mask >> 16),
+          .FilterMaskIdLow = (uint16_t)(mask & 0xFFFFu),
+          .FilterFIFOAssignment = CAN_FILTER_FIFO0,
+          .FilterBank = i,
+          .FilterMode = CAN_FILTERMODE_IDMASK,
+          .FilterScale = CAN_FILTERSCALE_32BIT,
+          .FilterActivation = CAN_FILTER_ENABLE,
+          .SlaveStartFilterBank = 14,
+      };
+
+      if (HAL_CAN_ConfigFilter(&hcan1, &can_filter) != HAL_OK)
+      {
+          Error_Handler();
+      }
+  }
+
+  if (HAL_CAN_Start(&hcan1) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
+  /* Error/bus-off notifications are enabled purely so HAL_CAN_GetError reflects
+   * live bus health in the periodic diagnostics; nothing acts on them. */
+  if (HAL_CAN_ActivateNotification(
+          &hcan1,
+          CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_ERROR |
+              CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE) != HAL_OK)
+  {
+      Error_Handler();
+  }
+#endif
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -1051,7 +1641,7 @@ int main(void)
   commandScheduleHandle = osThreadNew(StartTask1, NULL, &commandSchedule_attributes);
 
   /* creation of motorController */
-//  motorControllerHandle = osThreadNew(StartTask2, NULL, &motorController_attributes);
+  // motorControllerHandle = osThreadNew(StartTask2, NULL, &motorController_attributes);
 
   /* creation of logger */
   loggerHandle = osThreadNew(StartTask03, NULL, &logger_attributes);
@@ -1062,6 +1652,12 @@ int main(void)
   /* creation of outputWriter */
   outputWriterHandle = osThreadNew(StartTask05, NULL, &outputWriter_attributes);
 
+  /* creation of canCommand */
+  canCommandHandle = osThreadNew(StartTask06, NULL, &canCommand_attributes);
+
+  /* creation of canTelemetry */
+  canTelemetryHandle = osThreadNew(StartTask07, NULL, &canTelemetry_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   for (int i = 0; i < NUM_STEPPERS; i++){
 	  motorTaskHandles[i] = osThreadNew(StartTask2, &motorCtx[i], &motorController_attributes);
@@ -1071,9 +1667,22 @@ int main(void)
   /* USER CODE BEGIN RTOS_EVENTS */
   schedulerCommandQueue = osMessageQueueNew(16, sizeof(ControllerCommand), NULL);
   logQueue = osMessageQueueNew(LOG_QUEUE_DEPTH, LOG_MSG_MAX, NULL);
-  if (schedulerCommandQueue == NULL || logQueue == NULL)
+  canRxQueue = osMessageQueueNew(CAN_RX_QUEUE_DEPTH, sizeof(CanFrame), NULL);
+  if (schedulerCommandQueue == NULL || logQueue == NULL || canRxQueue == NULL)
   {
     Error_Handler();
+  }
+
+  /* Created after the motor tasks above, which is safe only because nothing runs
+   * until osKernelStart below. The native FreeRTOS API is used rather than
+   * osMessageQueueNew because CMSIS-RTOS2 has no overwrite primitive. */
+  for (int i = 0; i < NUM_STEPPERS; i++)
+  {
+    motorCommandQueue[i] = xQueueCreate(1, sizeof(ControllerCommand));
+    if (motorCommandQueue[i] == NULL)
+    {
+      Error_Handler();
+    }
   }
   /* USER CODE END RTOS_EVENTS */
 
@@ -1214,6 +1823,43 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief CAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN1_Init(void)
+{
+
+  /* USER CODE BEGIN CAN1_Init 0 */
+
+  /* USER CODE END CAN1_Init 0 */
+
+  /* USER CODE BEGIN CAN1_Init 1 */
+
+  /* USER CODE END CAN1_Init 1 */
+  hcan1.Instance = CAN1;
+  hcan1.Init.Prescaler = 3;
+  hcan1.Init.Mode = CAN_MODE_NORMAL;
+  hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_11TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan1.Init.TimeTriggeredMode = DISABLE;
+  hcan1.Init.AutoBusOff = DISABLE;
+  hcan1.Init.AutoWakeUp = DISABLE;
+  hcan1.Init.AutoRetransmission = DISABLE;
+  hcan1.Init.ReceiveFifoLocked = DISABLE;
+  hcan1.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN1_Init 2 */
+
+  /* USER CODE END CAN1_Init 2 */
 
 }
 
@@ -1462,6 +2108,70 @@ void ReportPreviousReset(void)
     g_reset_report.cause = 0;
     g_reset_report.task[0] = '\0';
 }
+
+/*
+ * CAN receive, at NVIC priority 6. Does the minimum and returns: pull frames out
+ * of FIFO0 into canRxQueue and let canCommand do the parsing. Nothing here
+ * formats or logs, because LogDeferred calls vsnprintf and is not ISR-safe, so
+ * losses are recorded in counters that the logger reports instead.
+ */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    CAN_RxHeaderTypeDef header;
+    CanFrame frame;
+
+    /* The FIFO is drained rather than handled one frame per interrupt: it holds
+     * three, and anything left behind would re-enter this handler immediately. */
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
+    {
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, frame.data) != HAL_OK)
+        {
+            break;
+        }
+
+        /* FRC uses extended identifiers exclusively. The filter already rejects
+         * standard-ID and remote frames in hardware, so this only catches a
+         * misconfigured filter. */
+        if (header.IDE != CAN_ID_EXT || header.RTR != CAN_RTR_DATA)
+        {
+            can_rx_invalid_count++;
+            continue;
+        }
+
+        frame.id = header.ExtId;
+        frame.dlc = (uint8_t)header.DLC;
+        can_rx_frame_count++;
+
+        /* Broadcast messages are answered here rather than being queued. Disable
+         * must take effect immediately per the spec, and that guarantee is only
+         * worth anything if it cannot sit behind other traffic or be dropped by
+         * a full queue. System Halt is treated identically: both mean "stop
+         * actuating now". The remaining broadcasts are optional and unimplemented,
+         * so they are counted and discarded. */
+        if (FRC_DEVICE_TYPE(frame.id) == FRC_DEVICE_TYPE_BROADCAST &&
+            FRC_MANUFACTURER(frame.id) == FRC_MANUFACTURER_BROADCAST)
+        {
+            can_broadcast_count++;
+
+            uint32_t message = FRC_API_INDEX(frame.id);
+            if (message == FRC_BCAST_DISABLE || message == FRC_BCAST_SYSTEM_HALT)
+            {
+                can_disable_count++;
+                CanDisableAllMotors();
+            }
+            continue;
+        }
+
+        /* CAN is started in main() before the queue is created, so a frame
+         * arriving in that window has nowhere to go. Counting it as a drop is
+         * correct and keeps the ISR free of ordering assumptions. */
+        if (canRxQueue == NULL ||
+            osMessageQueuePut(canRxQueue, &frame, 0, 0) != osOK)
+        {
+            can_rx_queue_drop_count++;
+        }
+    }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartTask1 */
@@ -1474,7 +2184,7 @@ void ReportPreviousReset(void)
 void StartTask1(void *argument)
 {
   /* init code for USB_DEVICE */
-//  MX_USB_DEVICE_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
 	ControllerCommand cmd;
 
@@ -1508,9 +2218,11 @@ void StartTask1(void *argument)
 				continue;
 			}
 
-			if (motorTaskHandles[cmd.motor_id] == NULL)
+			/* Guards the queue rather than the task handle, because the queue is
+			 * what gets written below and a NULL handle would fault. */
+			if (motorCommandQueue[cmd.motor_id] == NULL)
 			{
-				LogDeferred("ERR MOTOR HANDLE NULL %d\r\n", cmd.motor_id);
+				LogDeferred("ERR MOTOR QUEUE NULL %d\r\n", cmd.motor_id);
 				continue;
 			}
 
@@ -1529,21 +2241,14 @@ void StartTask1(void *argument)
 				continue;
 			}
 
-			uint32_t notifyValue = encodeCommand(cmd.target, cmd.speed < 0, abs(cmd.speed), cmd.type);
-
 			notify_sent[cmd.motor_id]++;
 
-			BaseType_t result = xTaskNotify(
-				motorTaskHandles[cmd.motor_id],
-				notifyValue,
-				eSetValueWithOverwrite
-			);
-
-			/* eSetValueWithOverwrite always succeeds, so only a failure is worth
-			 * reporting - logging every notify just burned USB bandwidth. */
-			if (result != pdPASS)
+			/* xQueueOverwrite on a depth-1 queue always succeeds, so only a
+			 * failure is worth reporting - logging every command just burned USB
+			 * bandwidth. */
+			if (xQueueOverwrite(motorCommandQueue[cmd.motor_id], &cmd) != pdPASS)
 			{
-				LogDeferred("ERR NOTIFY FAILED motor=%d\r\n", cmd.motor_id);
+				LogDeferred("ERR MOTOR QUEUE FAILED motor=%d\r\n", cmd.motor_id);
 			}
 		}
 	}
@@ -1560,17 +2265,16 @@ void StartTask1(void *argument)
 void StartTask2(void *argument)
 {
   /* USER CODE BEGIN StartTask2 */
-	uint32_t ulNotifiedValue;
+	ControllerCommand cmd;
 	MotorControllerContext *context = (MotorControllerContext*) argument;
 	StepperMotor* stepper = context->stepper;
 
 	/* Infinite loop */
 	for(;;)
 	{
-        if (xTaskNotifyWait(0, 0xFFFF, &ulNotifiedValue, osWaitForever)==pdTRUE){
+        if (xQueueReceive(motorCommandQueue[context->id], &cmd, portMAX_DELAY) == pdTRUE){
         	notify_recv[context->id]++;
-        	CommandType command = decodeCommand(ulNotifiedValue);
-        	switch (command) {
+        	switch (cmd.type) {
         		case CMD_STOP: {
         			stepper->speed = 0;
         			stepper->commanded_speed = 0;
@@ -1587,13 +2291,13 @@ void StartTask2(void *argument)
         		}
         		case CMD_MOVE_REL: {
         			MotorController_HandlePosMove(
-        				context, stepper, ulNotifiedValue, command, true);
+        				context, stepper, &cmd, true);
         			break;
         		}
         		case CMD_SET_SPEED:
         		case CMD_MOVE_ABS: {
         			MotorController_HandlePosMove(
-        				context, stepper, ulNotifiedValue, command, false);
+        				context, stepper, &cmd, false);
         			break;
         		}
         		default:
@@ -1628,6 +2332,9 @@ void StartTask03(void *argument)
 		              (unsigned long)log_drop_count);
 	  }
 
+
+	#if LOG_LEVEL == 3
+
 	  /* Command-path accounting. Each stage that can lose a command reports
 	   * here, so a drop can be attributed instead of guessed at:
 	   *   rx_drop  - bytes the USB ISR could not fit into usbRxStream. Nonzero
@@ -1661,6 +2368,64 @@ void StartTask03(void *argument)
 	           (unsigned long)(sent_total - recv_total));
 	  }
 
+	  /* CAN transport health. err is HAL_CAN_GetError, which latches the last
+	   * protocol error and the bus-off/passive state - a nonzero value with a
+	   * climbing tx_drop usually means the board is talking to nobody (no node
+	   * to ACK), not that the commands were bad. */
+	  LogDeferred("CAN1 rx=%lu irq=%lu read=%lu rerr=%lu qput=%lu qget=%lu qerr=%lu\r\n",
+	         (unsigned long)can_rx_frame_count,
+	         (unsigned long)can_rx_isolation_irq_count,
+	         (unsigned long)can_rx_isolation_read_count,
+	         (unsigned long)can_rx_isolation_error_count,
+	         (unsigned long)can_rx_isolation_queue_put_count,
+	         (unsigned long)can_rx_isolation_queue_get_count,
+	         (unsigned long)can_rx_isolation_queue_error_count);
+	  LogDeferred("CAN2 parse=%lu cmd=%lu before=%lu entry=%lu after=%lu sink=%lu\r\n",
+	         (unsigned long)can_rx_isolation_parse_count,
+	         (unsigned long)can_rx_isolation_command_count,
+	         (unsigned long)can_rx_isolation_call_before_count,
+	         (unsigned long)can_rx_isolation_call_entry_count,
+	         (unsigned long)can_rx_isolation_call_after_count,
+	         (unsigned long)can_rx_isolation_queue_command_count
+	  );
+	  LogDeferred("CAN3 qdrop=%lu invalid=%lu queued=%lu tx_drop=%lu bcast=%lu dis=%lu err=0x%08lX\r\n",
+	         (unsigned long)can_rx_queue_drop_count,
+	         (unsigned long)can_rx_invalid_count,
+	         (unsigned long)can_cmd_queued_count,
+	         (unsigned long)can_tx_drop_count,
+	         (unsigned long)can_broadcast_count,
+	         (unsigned long)can_disable_count,
+	         (unsigned long)HAL_CAN_GetError(&hcan1));
+
+	  uint32_t esr = CAN1->ESR;
+
+	  LogDeferred(
+	      "CAN ESR=%08lX TEC=%lu REC=%lu LEC=%lu "
+	      "BOFF=%lu EPVF=%lu EWGF=%lu\r\n",
+	      (unsigned long)esr,
+	      (unsigned long)((esr >> 16) & 0xFF),
+	      (unsigned long)((esr >> 24) & 0xFF),
+	      (unsigned long)((esr >> 4) & 0x07),
+	      (unsigned long)((esr >> 2) & 0x01),
+	      (unsigned long)((esr >> 1) & 0x01),
+	      (unsigned long)(esr & 0x01)
+	  );
+	  /* Minimum free stack ever seen, in words (x4 = bytes). A value near 0
+	  	   * means that task is about to overflow - bump its stack_size in the .ioc.
+	  	   * heap is the FreeRTOS pool left out of configTOTAL_HEAP_SIZE; every task
+	  	   * stack and queue is allocated from it, and logQueue alone takes
+	  	   * LOG_QUEUE_DEPTH * LOG_MSG_MAX = 5KB of the 32KB. */
+	  	  LogDeferred("Stack free words: motor0=%lu logger=%lu usb=%lu out=%lu can=%lu tlm=%lu heap=%lu\r\n",
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(motorTaskHandles[0]),
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(NULL),
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle),
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(outputWriterHandle),
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(canCommandHandle),
+	  	         (unsigned long)uxTaskGetStackHighWaterMark(canTelemetryHandle),
+	  	         (unsigned long)xPortGetFreeHeapSize());
+	#endif
+
+	#if LOG_LEVEL > 2
 	  /* 12-bit ADC (0..4095) mapped to a 0..360 degree angle. Buffer must be
 	   * uint16_t to match the halfword DMA config in HAL_ADC_MspInit. */
 	  uint32_t deg_x10[NUM_ENCODERS];
@@ -1673,17 +2438,11 @@ void StartTask03(void *argument)
 	         deg_x10[1] / 10U, deg_x10[1] % 10U,
 	         deg_x10[2] / 10U, deg_x10[2] % 10U,
 	         deg_x10[3] / 10U, deg_x10[3] % 10U);
-
-	  /* Minimum free stack ever seen, in words (x4 = bytes). A value near 0
-	   * means that task is about to overflow - bump its stack_size. */
-	  LogDeferred("Stack free words: motor0=%lu logger=%lu usb=%lu out=%lu\r\n",
-	         (unsigned long)uxTaskGetStackHighWaterMark(motorTaskHandles[0]),
-	         (unsigned long)uxTaskGetStackHighWaterMark(NULL),
-	         (unsigned long)uxTaskGetStackHighWaterMark(usbCommandHandle),
-	         (unsigned long)uxTaskGetStackHighWaterMark(outputWriterHandle));
+	#endif
 
 //	  DiagnoseSPIControllers();
 
+#if Log_Level == 3
 	  /* Live TMC5160 microstep counter. MSCNT (0x6A) advances only when the
 	   * driver actually receives STEP pulses, so if you command a move and the
 	   * matching slot's value changes, STEP/DIR is reaching the driver; if it
@@ -1721,42 +2480,11 @@ void StartTask03(void *argument)
 	           (drv >> 25) & 0x1,
 	           (drv >> 26) & 0x1);
 	  }
-
+#endif
 	  osDelay(DIAG_INTERVAL_MS);
+
   }
   /* USER CODE END StartTask03 */
-}
-
-/* USER CODE BEGIN Header_StartTask05 */
-/**
-* @brief Function implementing the outputWriter thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask05 */
-void StartTask05(void *argument)
-{
-  /* USER CODE BEGIN StartTask05 */
-  /* Sole owner of stdout. Everything else in the firmware queues text through
-   * LogDeferred and returns immediately, so no task ever blocks on USB except
-   * this one - and nothing depends on this one making progress.
-   *
-   * Being the only writer also matters for correctness: configUSE_NEWLIB_REENTRANT
-   * is 0, so two tasks calling printf concurrently would share and corrupt a
-   * single stdout buffer. */
-  char msg[LOG_MSG_MAX];
-
-  for(;;)
-  {
-	  if (osMessageQueueGet(logQueue, msg, NULL, osWaitForever) != osOK)
-	  {
-		  continue;
-	  }
-
-	  fputs(msg, stdout);
-	  fflush(stdout);
-  }
-  /* USER CODE END StartTask05 */
 }
 
 /* USER CODE BEGIN Header_StartTask04 */
@@ -1829,6 +2557,116 @@ void StartTask04(void *argument)
 		}
 	}
   /* USER CODE END StartTask04 */
+}
+
+/* USER CODE BEGIN Header_StartTask05 */
+/**
+* @brief Function implementing the outputWriter thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask05 */
+void StartTask05(void *argument)
+{
+  /* USER CODE BEGIN StartTask05 */
+  /* Sole owner of stdout. Everything else in the firmware queues text through
+  * LogDeferred and returns immediately, so no task ever blocks on USB except
+  * this one - and nothing depends on this one making progress.
+  *
+  * Being the only writer also matters for correctness: configUSE_NEWLIB_REENTRANT
+  * is 0, so two tasks calling printf concurrently would share and corrupt a
+  * single stdout buffer. */
+  char msg[LOG_MSG_MAX];
+
+  for(;;)
+  {
+    if (osMessageQueueGet(logQueue, msg, NULL, osWaitForever) != osOK)
+    {
+      continue;
+    }
+
+    fputs(msg, stdout);
+    fflush(stdout);
+  }
+  /* USER CODE END StartTask05 */
+}
+
+/* USER CODE BEGIN Header_StartTask06 */
+/**
+* @brief Function implementing the canCommand thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask06 */
+void StartTask06(void *argument)
+{
+  /* USER CODE BEGIN StartTask06 */
+  /* Alternative control interface to the USB console, feeding the same
+   * scheduler queue. It runs above usbCommand and outputWriter so a burst of
+   * console text - or a host that has stopped reading, which makes a USB write
+   * busy-wait for up to 50ms - can never delay a CAN command; and below
+   * commandSchedule so that consumer still preempts this producer and drains the
+   * queue inside the put that filled it. */
+  CanFrame frame;
+
+  /* Infinite loop */
+  for(;;)
+  {
+    if (osMessageQueueGet(canRxQueue, &frame, NULL, osWaitForever) == osOK)
+    {
+#if CAN_RX_IRQ_ISOLATION_TEST
+      /* Stage 4 isolation: run the real API/device/DLC parser. Its command sink
+       * above prevents scheduler forwarding and motor actions. */
+      can_rx_isolation_queue_get_count++;
+      can_rx_isolation_parse_count++;
+      HandleCanFrame(&frame);
+#else
+      HandleCanFrame(&frame);
+#endif
+    }
+  }
+  /* USER CODE END StartTask06 */
+}
+
+/* USER CODE BEGIN Header_StartTask07 */
+/**
+* @brief Function implementing the canTelemetry thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask07 */
+void StartTask07(void *argument)
+{
+  /* USER CODE BEGIN StartTask07 */
+#if USE_CAN_COMMANDS
+  /* Sole transmitter on the bus, for the same reason outputWriter is the sole
+   * writer to stdout: HAL_CAN_AddTxMessage claims a mailbox with a
+   * read-then-write that is not atomic against a higher-priority task doing the
+   * same thing.
+   *
+   * The wait is relative rather than an osDelayUntil deadline so that the same
+   * blocking call serves both the periodic cadence and an on-request
+   * CAN_API_ENCODER_REQ. A request therefore re-phases the periodic stream, which
+   * is harmless for independent samples, and the rate is "at least
+   * CAN_TLM_INTERVAL_MS apart" - already the case anyway, since a 10ms timeout
+   * on a 1kHz tick quantises to +/-1ms. */
+  const uint32_t wait =
+      (CAN_TLM_INTERVAL_MS > 0) ? CAN_TLM_INTERVAL_MS : osWaitForever;
+
+  /* Infinite loop */
+  for(;;)
+  {
+    osThreadFlagsWait(CAN_TLM_FLAG_PUBLISH, osFlagsWaitAny, wait);
+    CanPublishEncoders();
+  }
+#else
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1000);
+  }
+#endif
+  /* USER CODE END StartTask07 */
 }
 
 /**

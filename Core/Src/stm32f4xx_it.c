@@ -22,7 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "cmsis_os2.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,7 +63,8 @@ extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
-
+extern CAN_HandleTypeDef hcan1;
+extern osMessageQueueId_t canRxQueue;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -235,5 +236,53 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles CAN1 RX0 interrupts.
+  * @note  Hand-written because CAN1 RX0 is not enabled in the .ioc NVIC tab.
+  *        Enabling it there makes CubeMX generate this same handler, so delete
+  *        this one if you do - see HAL_CAN_MspInit in stm32f4xx_hal_msp.c.
+  */
+void CAN1_RX0_IRQHandler(void)
+{
+#if CAN_RX_IRQ_ISOLATION_TEST
+  /* Stage 2 isolation test: drain FIFO0 with the HAL's frame-copy routine, but
+   * bypass HAL_CAN_IRQHandler(), the application callback, and every RTOS API.
+   * No frame data escapes this scope; only simple volatile counters are updated. */
+  CAN_RxHeaderTypeDef header;
+  struct {
+    uint32_t id;
+    uint8_t dlc;
+    uint8_t data[8];
+  } frame;
 
+  can_rx_isolation_irq_count++;
+
+  while (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) > 0U)
+  {
+    if (HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &header, frame.data) == HAL_OK)
+    {
+      can_rx_isolation_read_count++;
+
+      frame.id = header.ExtId;
+      frame.dlc = (uint8_t)header.DLC;
+      if (canRxQueue != NULL &&
+          osMessageQueuePut(canRxQueue, &frame, 0, 0) == osOK)
+      {
+        can_rx_isolation_queue_put_count++;
+      }
+      else
+      {
+        can_rx_isolation_queue_error_count++;
+      }
+    }
+    else
+    {
+      can_rx_isolation_error_count++;
+      break;
+    }
+  }
+#else
+  HAL_CAN_IRQHandler(&hcan1);
+#endif
+}
 /* USER CODE END 1 */
