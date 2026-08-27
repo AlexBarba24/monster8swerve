@@ -72,7 +72,8 @@ typedef enum {
     CMD_SET_SPEED = 0x4,
     CMD_STOP = 0x5,
     CMD_DISABLE = 0x6,
-    CMD_STATUS = 0x7
+    CMD_STATUS = 0x7,
+	CMD_POLL = 0x8
 } CommandType;
 
 typedef enum {
@@ -167,6 +168,7 @@ typedef struct {
 /* Table 1 - CAN Device Types, and Table 2 - CAN Manufacturer Codes. */
 #define FRC_DEVICE_TYPE_BROADCAST        0u
 #define FRC_DEVICE_TYPE_MOTOR_CONTROLLER 2u
+#define FRC_DEVICE_TYPE_ENCODER 		 7u
 #define FRC_MANUFACTURER_BROADCAST       0u
 #define FRC_MANUFACTURER_TEAM_USE        8u
 
@@ -207,8 +209,8 @@ typedef struct {
 #define CAN_API_STATUS       0x050u /* class 5 index 0. Payload ignored */
 #define CAN_API_ENCODER_REQ  0x051u /* class 5 index 1. Payload ignored, board-level */
 #define CAN_API_TLM_ENCODERS 0x060u /* class 6 index 0. DLC 8: 4 x u16 ADC counts */
-/* Class 6 index 1 onward is reserved for per-motor status frames, which would
- * mirror the command payload: int32 position then int32 speed. */
+#define CAN_API_POLL_ENCODER 0x061u /* class 6 index 1. Frequency to report encoder values. */
+
 
 /* Broadcast messages carry device type 0, manufacturer 0 and API class 0, so the
  * message number is the API index and Disable is arbitration ID 0x00000000 -
@@ -231,7 +233,7 @@ typedef struct {
  * number - motor 0's address - because a board-level frame still needs a device
  * number and that is the one that identifies this board's block. */
 #define CAN_TX_ID_ENCODERS \
-    FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, CAN_API_TLM_ENCODERS, CAN_MOTOR_ID_BASE)
+    FRC_MAKE_ID(FRC_DEVICE_TYPE_ENCODER, CAN_MANUFACTURER, CAN_API_TLM_ENCODERS, CAN_MOTOR_ID_BASE)
 
 /* Receive filters, as {id, mask} pairs over the 29-bit identifier. A 1 in the
  * mask means the bit must match.
@@ -405,6 +407,9 @@ volatile uint32_t log_drop_count = 0;
 volatile uint32_t cmd_invalid_count = 0;
 volatile uint32_t cmd_queue_drop_count = 0;
 volatile uint32_t cmd_queue_peak = 0;
+
+volatile uint32_t encoder_poll_rate = 1;
+volatile uint32_t encoder_poll_acc = 0;
 
 /* CAN command-path accounting, mirroring the USB counters above so a lost
  * command can be attributed to a stage rather than guessed at:
@@ -1235,6 +1240,7 @@ static bool CanCommandForApi(uint32_t api, CommandType *type, bool *needs_payloa
  */
 static void CanPublishEncoders(void)
 {
+	LogDeferred("Publishing Encoder Values\r\n");
     CAN_TxHeaderTypeDef header = {
         .StdId = 0,
         .ExtId = CAN_TX_ID_ENCODERS,
@@ -1317,6 +1323,10 @@ static void HandleCanFrame(const CanFrame *frame)
     uint32_t device = FRC_DEVICE_NUMBER(frame->id);
 
     /* Board-level identifiers, which are not addressed to a motor. */
+    if (api == CAN_API_POLL_ENCODER) {
+    	encoder_poll_rate = CanReadInt32(&frame->data[0]);
+    	return;
+    }
     if (api == CAN_API_ENCODER_REQ)
     {
         /* Delegated to canTelemetry rather than transmitted here so that every
@@ -1332,6 +1342,10 @@ static void HandleCanFrame(const CanFrame *frame)
          * back to us in the loopback modes used for bench testing. Ignored rather
          * than reported, so loopback stays quiet. */
         return;
+    }
+
+    if (FRC_DEVICE_TYPE(frame->id) == FRC_DEVICE_TYPE_ENCODER) {
+
     }
 
     CommandType type;
@@ -1565,6 +1579,8 @@ int main(void)
   } can_filters[] = {
       { FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, 0, CAN_MOTOR_ID_BASE),
         CAN_FILTER_MASK_MOTORS },
+	{ FRC_MAKE_ID(FRC_DEVICE_TYPE_ENCODER, CAN_MANUFACTURER, 0, CAN_MOTOR_ID_BASE),
+			CAN_FILTER_MASK_MOTORS },
       { FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, 0, FRC_DEVICE_NUMBER_BROADCAST),
         CAN_FILTER_MASK_DEVICE },
       { FRC_MAKE_ID(FRC_DEVICE_TYPE_BROADCAST, FRC_MANUFACTURER_BROADCAST, 0, 0),
@@ -2650,14 +2666,18 @@ void StartTask07(void *argument)
    * is harmless for independent samples, and the rate is "at least
    * CAN_TLM_INTERVAL_MS apart" - already the case anyway, since a 10ms timeout
    * on a 1kHz tick quantises to +/-1ms. */
-  const uint32_t wait =
-      (CAN_TLM_INTERVAL_MS > 0) ? CAN_TLM_INTERVAL_MS : osWaitForever;
+//  const uint32_t wait =
+//      (CAN_TLM_INTERVAL_MS > 0) ? CAN_TLM_INTERVAL_MS : osWaitForever;
 
   /* Infinite loop */
   for(;;)
   {
-    osThreadFlagsWait(CAN_TLM_FLAG_PUBLISH, osFlagsWaitAny, wait);
+	if (encoder_poll_rate == 0) {
+		osDelay(50);
+		continue;
+	}
     CanPublishEncoders();
+    osDelay(1000 / encoder_poll_rate);
   }
 #else
   /* Infinite loop */

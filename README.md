@@ -1,73 +1,40 @@
 # monster8swerve
 
-Stepper-motor controller firmware for an **STM32F407VET6** board. It runs on
-FreeRTOS and drives eight steppers (four drive + four steer) for swerve-drive
-control. Two command transports feed the same motion scheduler:
+Firmware for an **STM32F407VET6** board that drives eight steppers (four drive,
+four steer) for a swerve chassis. It runs on FreeRTOS. Commands arrive over USB
+CDC (text, for bench work) or CAN1 at 1 Mbit/s (FRC addressing, for the
+roboRIO). Both feeds share one motion scheduler.
 
-- a line-based text interface over a **USB virtual COM port (CDC)**, for humans
-  and bench testing;
-- a binary frame interface over **CAN1 at 1 Mbit/s** using **FRC/FIRST addressing**
-  (manufacturer 8, one device number per motor), intended as the machine control
-  path, which also publishes encoder telemetry back onto the bus.
+## Contents
 
-## Features
+- [Usage](#usage)
+- [Wiring](#wiring)
+- [Flashing with STM32CubeProgrammer (USB)](#flashing-with-stm32cubeprogrammer-usb)
+- [Serial console](#serial-console)
+- [CAN protocol](#can-protocol)
+- [Task hierarchy](#task-hierarchy)
 
-- Two independent command transports (USB CDC text, CAN frames) sharing one
-  command queue, so either can drive the machine and both can be used at once.
-- Step-pulse generation from a 10 kHz `TIM2` interrupt, so timing is independent
-  of the command/logging tasks.
-- Absolute / relative position moves with full `int32` targets, continuous speed
-  (jog) mode, stop, and disable. A USB line can address several motors at once; a
-  CAN frame addresses one motor, or all eight via the reserved `0x3F` address.
-- Honours the **FRC Disable broadcast**, applied inside the receive interrupt so it
-  cannot queue behind other traffic or be dropped.
-- 4-channel ADC sampling (analog encoders) streamed via DMA, published over CAN
-  either periodically or on request.
-- Crash reporting: a stack overflow / malloc failure / hard fault is recorded in
-  no-init RAM and printed on the next boot.
-- Per-stage drop counters for both transports, so a lost command can be
-  attributed to a stage instead of guessed at.
+## Usage
 
-## Hardware
+This is an STM32CubeIDE project (`.cproject` / `.project` / `monster8swerve.ioc`).
+Build either from the IDE or from the generated makefile. The artifacts you
+flash are `Debug/monster8swerve.elf` and `Debug/monster8swerve.bin`.
 
-| Item        | Detail                                  |
-|-------------|-----------------------------------------|
-| MCU         | STM32F407VET6 (custom board)            |
-| Clock       | 168 MHz (HSE + PLL)                     |
-| Encoders    | ADC1 channels 4–7 (`PA4`–`PA7`)         |
-| Console     | USB Full-Speed CDC (virtual COM port)   |
-| CAN         | CAN1 on `PB8` (RX) / `PB9` (TX), 1 Mbit/s |
+If you change peripherals in `monster8swerve.ioc`, regenerate code from CubeMX /
+CubeIDE before rebuilding.
 
-`PB8`/`PB9` need a CAN transceiver (e.g. an SN65HVD230 or MCP2551 module) and a
-120 Ω terminated bus; they are not a bus by themselves.
+### STM32CubeIDE
 
-### Motor map
+1. Open STM32CubeIDE.
+2. Import this folder: **File → Open Projects from File System…** (or
+  **File → Import → Existing Projects into Workspace**) and select the
+   `monster8swerve` root.
+3. Select the `Debug` configuration.
+4. Build with the hammer icon, or **Project → Build Project**.
 
-Even ids are drive motors, odd ids are steer motors. Enable pins are active-low
-and some are shared between two motors.
+That writes `monster8swerve.elf` / `.bin` / `.hex` under `Debug/`.
 
-| id | Position          | STEP   | DIR    | EN     |
-|----|-------------------|--------|--------|--------|
-| 0  | Front left drive  | `PC14` | `PC13` | `PC15` |
-| 1  | Front left steer  | `PE5`  | `PE4`  | `PC15` |
-| 2  | Front right drive | `PE1`  | `PE0`  | `PE2`  |
-| 3  | Front right steer | `PB5`  | `PB4`  | `PB6`  |
-| 4  | Back left drive   | `PD6`  | `PD5`  | `PD7`  |
-| 5  | Back left steer   | `PD2`  | `PD1`  | `PD3`  |
-| 6  | Back right drive  | `PC7`  | `PC6`  | `PC8`  |
-| 7  | Back right steer  | `PD13` | `PD12` | `PB6`  |
-
-## Building and flashing
-
-This is an **STM32CubeIDE** project (`.cproject` / `.project` / `monster8swerve.ioc`).
-
-### Option A — STM32CubeIDE (easiest)
-
-1. Open STM32CubeIDE and import this folder (*File → Open Projects from File System*).
-2. Build the `Debug` configuration (hammer icon).
-3. Connect an ST-Link to the board's SWD header and click *Run* to flash.
-
-### Option B — Command line
+### Make
 
 A generated makefile lives in `Debug/`:
 
@@ -76,83 +43,152 @@ cd Debug
 make -j
 ```
 
-This produces `monster8swerve.elf` / `.bin`. Flash with your tool of choice, e.g.:
+On Windows, use the CubeIDE-bundled toolchain (the `Debug` makefile already
+points at it), or run **make** from the CubeIDE Makefile project build. The
+same three artifacts appear in `Debug/` when the build succeeds.
 
 ```bash
-st-flash write monster8swerve.bin 0x08000000
+ls monster8swerve.elf monster8swerve.bin
 ```
 
-> Tip: if you edit peripheral configuration in `monster8swerve.ioc`, regenerate
-> code from CubeMX/CubeIDE before rebuilding.
 
-## Connecting to the command console
 
-After flashing, plug the board's USB port into your computer. It enumerates as a
-CDC virtual serial port:
+## Firmware pin map
 
-- **Linux:** `/dev/ttyACM0`
-- **macOS:** `/dev/tty.usbmodem*`
-- **Windows:** a `COMx` port
+Enable pins are active-low. Some enables are shared between two motors.
 
-Open it with any serial terminal (baud rate is ignored for USB CDC):
+
+| Id  | Role              | STEP   | DIR    | EN     |
+| --- | ----------------- | ------ | ------ | ------ |
+| 0   | Front left drive  | `PC14` | `PC13` | `PC15` |
+| 1   | Front left steer  | `PE5`  | `PE4`  | `PC15` |
+| 2   | Front right drive | `PE1`  | `PE0`  | `PE2`  |
+| 3   | Front right steer | `PB5`  | `PB4`  | `PB6`  |
+| 4   | Back left drive   | `PD6`  | `PD5`  | `PD7`  |
+| 5   | Back left steer   | `PD2`  | `PD1`  | `PD3`  |
+| 6   | Back right drive  | `PC7`  | `PC6`  | `PC8`  |
+| 7   | Back right steer  | `PD13` | `PD12` | `PB6`  |
+
+
+
+| Function        | MCU pins                                                                     |
+| --------------- | ---------------------------------------------------------------------------- |
+| USB CDC         | USB Full-Speed (virtual COM port)                                            |
+| CAN1            | `PB8` (RX), `PB9` (TX), 1 Mbit/s — needs a transceiver and 120 Ω termination |
+| Analog encoders | ADC1 IN4–IN7 on `PA4`–`PA7`                                                  |
+
+The encoders connect to pins `PA4`-`PA7` and recieve 3.3V power from the 3v3 and GND pins
+from the `EXP2` module. The `EXP2` layout can be found in the [pinout](https://github.com/makerbase-mks/MKS-Monster8/blob/0116434039f06b17c72ed5d1c43724a9d4a5d81b/hardware/MKS%20Monster8%20V2.0_003/MKS%20Monster8%20V2.0_003%20PIN.pdf).
+
+
+## Flashing with STM32CubeProgrammer (USB)
+
+You do not need an ST-Link. STM32CubeProgrammer can load the image over the
+board's USB port using the STM32 ROM bootloader (USB DFU). That is the USB
+connection type in CubeProgrammer; the chip has to be in **system-memory boot**,
+not running the application from flash.
+
+### 1. Put the board in USB DFU boot mode
+
+Press the `BOOT0` and `RESET` Buttons simultaneously, a red light will indicate that the board is in DFU boot mode.
+
+The chip should enumerate as an STM32 DFU device (`STM32 BOOTLOADER`), not as
+the CDC serial port the firmware uses.
+
+Windows: install the USB DFU driver that ships with STM32CubeProgrammer
+(`DFU driver/STM32 Bootloader.bat`) if the device does not appear.
+
+### 2. Connect CubeProgrammer over USB
+
+1. Open **STM32CubeProgrammer**.
+2. In the connection panel on the right, change the interface from *ST-LINK* to
+  **USB**.
+3. Click the refresh icon next to **Port**. You should see something like
+  `USB1` with an STM32 DFU serial number.
+4. Click **Connect**. The indicator turns green and the device information
+  panel fills in (an F4 part, flash size, and so on).
+
+If Port stays empty, the board is still booting from flash. Recheck BOOT0,
+reset again, and confirm you are on the MCU USB port.
+
+### 3. Download the image
+
+1. **Open file** and choose `Debug/monster8swerve.elf` (or `.bin` / `.hex`).
+2. Click **Download**.
+3. Wait for the "File download complete" log line.
+4. **Disconnect**.
+
+
+
+### 4. Run the application
+
+Press the reset button to run the flashed application. The board will automatically reload the flashed
+firmware on startup.
+
+It should now enumerate as a USB CDC serial port (see [Serial console](#serial-console)),
+not as a DFU device.
+
+## Serial console
+
+After a normal (flash-boot) reset, plug the board's USB port into the host. It
+enumerates as a CDC virtual COM port:
+
+- Linux: `/dev/ttyACM0`
+- macOS: `/dev/tty.usbmodem*`
+- Windows: `COMx` (Device Manager → Ports)
+
+For windows, connect to the board using `serial_terminal.py`, which will automatically
+find and open the COM port for the monster8.
+
+On macOS/Linux, Attach with `screen`:
 
 ```bash
-# Linux/macOS example
+# Linux / macOS
 screen /dev/ttyACM0 115200
-# or
-minicom -D /dev/ttyACM0
 ```
 
-Each command is a single line terminated by Enter (`\r` or `\n`). Characters are
-not echoed back by default (`USB_ECHO_ENABLED` is `0`, since echoing costs a USB
-transaction per line), and per-command acknowledgements are off by default too
-(`CMD_LOG_VERBOSE` is `0`). Errors, batch summaries, and the periodic
-diagnostics are always reported.
+Detach with `Ctrl+A`, then `K`, then `Y`. `minicom` or PuTTY work as well.
 
-## Command reference
+Each command is one line ended by Enter (`\r` or `\n`). Characters are not
+echoed (`USB_ECHO_ENABLED` is 0). Errors, batch summaries, and the periodic
+diagnostics always print; per-command traces follow `CMD_LOG_VERBOSE`.
 
-All commands target a motor by id `0`–`7` (see the motor map above).
+### Command table
 
-| Command | Arguments | Description |
-|---------|-----------|-------------|
-| `MOVEABS <id> <target> <speed>` | target in steps (absolute), speed | Move to an absolute step position. |
-| `MOVEREL <id> <target> <speed>` | target in steps (relative), speed | Move by an offset from the current position. |
-| `MOVESPEED <id> <speed>`        | signed speed | Run continuously (jog). Sign of speed sets direction; `0` stops. |
-| `STOP <id>`                     | —            | Stop the motor (sets speed to 0). |
-| `DISABLE <id>`                  | —            | De-energize the driver (releases the enable pin). |
-| `STATUS <id>`                   | —            | Print target, position, speed, enabled flag, and mode. |
+Motor ids are `0`–`7`. Every command except `STATUS` can repeat its argument
+group on one line to address several motors, e.g. `STOP 0 1 2 3`. Batches are
+**not** atomic: under queue pressure some motors in the line can be accepted
+while others are dropped.
 
-Every command except `STATUS` accepts its argument group repeatedly to address
-several motors on one line, e.g. `MOVEABS 0 2000 80 2 2000 80` or `STOP 0 1 2 3`.
-The batch is deliberately **not** atomic: each motor is queued independently, so
-under queue pressure some can be accepted while others in the same line are
-dropped. The summary line reports how many of each.
 
-### Speed and position units
+| Command                         | Arguments                         | Description                                            |
+| ------------------------------- | --------------------------------- | ------------------------------------------------------ |
+| `MOVEABS {id} {target} {speed}` | target in steps (absolute), speed | Move to an absolute step position.                     |
+| `MOVEREL {id} {target} {speed}` | target in steps (relative), speed | Move by an offset from the current position.           |
+| `MOVESPEED {id} {speed}`        | signed speed                      | Jog continuously. Sign is direction; `0` stops.        |
+| `STOP {id}`                     | —                                 | Stop (speed 0); driver stays energized.                |
+| `DISABLE {id}`                  | —                                 | De-energize the driver (release enable).               |
+| `STATUS {id}`                   | —                                 | Print target, position, speed, enabled flag, and mode. |
 
-- **Position/`target`** is a signed 32-bit count of motor steps; `position` is
-  tracked by the firmware starting from `0` at boot.
-- **Speed** is a unitless rate fed into the step accumulator. The step ISR runs at
-  10 kHz and emits a pulse whenever the accumulator exceeds `MAX_SPEED` (250),
-  with a pulse occupying two ticks, so the pulse rate is roughly
-  `10000 * speed / (250 + speed)` steps/s — about 2.4 kHz at `speed = 80`, with a
-  hard ceiling of 5 kHz at `speed = 250`. Speed is clamped to `MAX_SPEED`, and `0`
-  selects the default speed (80) for position moves.
 
-### Examples
+Position/`target` is a signed 32-bit step count, zeroed at boot. Speed is a
+unitless rate clamped to `MAX_SPEED` (250). The step ISR runs at 10 kHz;
+pulse rate is roughly `10000 * speed / (250 + speed)` steps/s (about 2.4 kHz at
+speed 80, ceiling 5 kHz at 250). For position moves, speed `0` means the
+default (80).
 
 ```text
-MOVEABS 0 2000 80      # move motor 0 to step 2000 at speed 80
-MOVEREL 0 -400 120     # back off 400 steps from current position
-MOVESPEED 0 60         # jog forward continuously
-MOVESPEED 0 -60        # jog in reverse
+MOVEABS 0 2000 80      # motor 0 to step 2000 at speed 80
+MOVEREL 0 -400 120     # back off 400 steps
+MOVESPEED 0 60         # jog forward
+MOVESPEED 0 -60        # jog reverse
 MOVESPEED 0 0          # stop jogging
-STOP 0                 # stop
-STATUS 0               # query state
-DISABLE 0              # release the driver
+STOP 0
+STATUS 0
+DISABLE 0
 ```
 
-Typical responses:
+Typical replies:
 
 ```text
 MOVEABS BATCH DONE queued=1 failed=0
@@ -161,303 +197,194 @@ Motor (0) Status: target=2000, position=2000, speed=80, commanded_speed=80, enab
 
 An unrecognized line returns `Invalid Command Received.`
 
-## CAN control interface
+## CAN protocol
 
-CAN1 runs at **1 Mbit/s** (42 MHz PCLK1 ÷ prescaler 3 ÷ 14 TQ) using
-**29-bit extended identifiers in the [FRC addressing
-format](https://docs.wpilib.org/en/stable/docs/software/can-devices/can-addressing.html)**.
-All multi-byte fields are **little-endian**.
+CAN1 runs at **1 Mbit/s** with **29-bit extended identifiers** in the
+[FRC addressing format](https://docs.wpilib.org/en/stable/docs/software/can-devices/can-addressing.html).
+All multi-byte fields are little-endian.
 
-[CAN_PROTOCOL.md](CAN_PROTOCOL.md) is the full wire-format reference; this is the
-summary.
+[CAN_PROTOCOL.md](CAN_PROTOCOL.md) is the full wire-format reference. This is
+the working summary.
 
 ### Addressing
 
-| Field | Bits | Value |
-|-------|------|-------|
-| Device type | 28:24 | **2** — Motor Controller |
-| Manufacturer | 23:16 | **8** — Team Use |
-| API class / index | 15:6 | per command, below |
-| Device number | 5:0 | **motor id**, 0–7 |
 
-So the identifier base is `0x0208_0000`, and
-`full_id = base | (api_id << 6) | motor_id`.
+| Field             | Bits  | Value                                                       |
+| ----------------- | ----- | ----------------------------------------------------------- |
+| Device type       | 28:24 | **2** motor controller, or **7** encoder (telemetry / poll) |
+| Manufacturer      | 23:16 | **8** (Team Use)                                            |
+| API class / index | 15:6  | per command, below                                          |
+| Device number     | 5:0   | motor id `0`–`7`                                            |
 
-**Each motor is its own FRC device.** One frame commands one motor, the same shape
-a Talon or SparkMax presents, which means any FRC tool walking the bus sees eight
-motor controllers rather than one opaque board — and it leaves the whole 8-byte
-payload free for a 32-bit position and a 32-bit speed.
 
-`CAN_MOTOR_ID_BASE` moves the block of eight. It must be a multiple of 8 (enforced
-by a `_Static_assert`) because one filter mask accepts the whole aligned block, so
-valid bases are 0, 8, 16 … 48 and seven boards can share a bus. Device number
-`0x3F` is the spec's device-specific broadcast address and is accepted as **"every
-motor on this board"**, which keeps an all-stop down to one frame.
+Motor identifier base is `0x0208_0000`:
 
-### Payload
+```text
+full_id = base | (api_id << 6) | motor_id
+```
 
-Every command uses the same 8 bytes:
+Each motor is its own FRC device. Device number `0x3F` means every motor on
+this board. `CAN_MOTOR_ID_BASE` in `main.c` must stay a multiple of 8 so one
+hardware filter covers the whole block (valid bases: 0, 8, … 48).
 
-| Bytes | Field | Type |
-|-------|-------|------|
-| 0–3 | Target position | `int32` little-endian |
-| 4–7 | Speed | `int32` little-endian |
+### Payload (commands)
 
-`MOVESPEED` ignores the target; `STOP`, `DISABLE` and `STATUS` ignore the payload
-entirely and accept any DLC. Motion commands require DLC exactly 8 — a short frame
-is rejected rather than zero-filled, since zero-filling would turn a truncated
-command into a plausible move-to-zero.
+
+| Bytes | Field           | Type       |
+| ----- | --------------- | ---------- |
+| 0–3   | Target position | `int32` LE |
+| 4–7   | Speed           | `int32` LE |
+
+
+`MOVESPEED` ignores target. `STOP` / `DISABLE` / `STATUS` ignore the payload
+and accept any DLC. Motion commands require DLC **exactly 8**. Speed outside
+±250 is rejected, not clamped.
 
 ### Commands (client → board)
 
-Add the motor id to each identifier, or `0x3F` to address all eight.
+Add the motor id, or `0x3F` for all eight.
 
-| Motor 0 ID | API | Command | Payload used |
-|------------|-----|---------|--------------|
-| `0x02080000` | `0x000` | STOP | none |
-| `0x02080040` | `0x001` | DISABLE | none |
-| `0x02080400` | `0x010` | MOVESPEED | speed (sign = direction) |
-| `0x02080C00` | `0x030` | MOVEABS | target + speed |
-| `0x02080C40` | `0x031` | MOVEREL | target + speed |
-| `0x02081400` | `0x050` | STATUS | none; reply goes to the USB log, not the bus |
-| `0x02081440` | `0x051` | ENCODER_REQ | none; board-level, always the base device number |
 
-API classes follow the convention in the spec's motor-controller example: 1 is
-speed control, 3 is position control, 5 is status, 6 is periodic status, and class
-0 holds the stop/disable controls. Because the API identifier sits above the
-device number, a `STOP` for any motor still wins arbitration against a `MOVEABS`
-for any motor.
+| Motor 0 ID   | API     | Command      | Payload                                    |
+| ------------ | ------- | ------------ | ------------------------------------------ |
+| `0x02080000` | `0x000` | STOP         | none                                       |
+| `0x02080040` | `0x001` | DISABLE      | none                                       |
+| `0x02080400` | `0x010` | MOVESPEED    | speed (sign = direction)                   |
+| `0x02080C00` | `0x030` | MOVEABS      | target + speed                             |
+| `0x02080C40` | `0x031` | MOVEREL      | target + speed                             |
+| `0x02081400` | `0x050` | STATUS       | none; reply is printed on USB, not CAN     |
+| `0x02081440` | `0x051` | ENCODER_REQ  | none; one telemetry frame now              |
+| `0x07081840` | `0x061` | POLL_ENCODER | `int32` rate in Hz (`0` pauses the stream) |
 
-API `0x061`+ is reserved for per-motor status frames, which would mirror the
-command payload. The receive filter accepts every API identifier already, so
-adding one needs no filter change.
 
-### Broadcast messages
+API classes follow the FRC motor-controller example: 1 speed, 3 position, 5
+status, 6 periodic status. Class 0 is stop/disable, so a `STOP` still wins
+arbitration against a `MOVEABS`.
 
-| Full ID | Message | Behaviour |
-|---------|---------|-----------|
-| `0x00000000` | Disable | All motors stopped and de-energised **inside the RX interrupt** |
-| `0x00000040` | System Halt | Treated identically to Disable |
-| others | Reset, Query, Heartbeat, … | Counted and ignored |
+### Broadcasts
 
-Disable is arbitration ID 0, the highest-priority frame that can exist on a CAN
-bus, and the spec requires devices to act on it immediately. It is therefore
-handled in the interrupt rather than queued: the normal command path is four hops
-deep through bounded queues that may drop frames under load, and neither the
-latency nor the possibility of a drop is acceptable here. Each motor's `enabled`
-flag is cleared first, because that is the flag the step ISR checks before
-emitting a pulse.
 
-**Disable does not latch** — the next motion command re-enables the board. Proper
-FRC enable gating uses the roboRIO universal heartbeat (`0x01011840`, every 20 ms),
-which this firmware does not implement; see
-[CAN_PROTOCOL.md](CAN_PROTOCOL.md#disable-is-not-latching) for why a latch without
-heartbeat support would be worse.
+| Full ID      | Message                    | Behaviour                                                       |
+| ------------ | -------------------------- | --------------------------------------------------------------- |
+| `0x00000000` | Disable                    | All motors stopped and de-energized **inside the RX interrupt** |
+| `0x00000040` | System Halt                | Same as Disable                                                 |
+| others       | Reset, Query, Heartbeat, … | Counted and ignored                                             |
 
-Positions are full `int32` all the way to the motor. That matters rather than
-being theoretical: a 200-step motor at 256 microsteps is 51,200 steps per
-revolution, so the `int16` target of the previous protocol revision could not
-express even one full turn. Speeds are still limited to ±250 (`MAX_SPEED`), and a
-value outside that range is rejected and logged rather than clamped.
 
-A frame sent to `0x3F` expands to eight independent commands, so it is **not
-atomic**: under scheduler-queue pressure some motors can be accepted while others
-are dropped, the same as a batched USB line.
+Disable does **not** latch: the next motion command re-enables the board. There
+is no roboRIO heartbeat timeout. If the client vanishes, motors hold their last
+speed until you send `STOP` or the Disable broadcast.
 
 ### Telemetry (board → client)
 
-| Full ID | API | Contents | DLC |
-|---------|-----|----------|-----|
-| `0x02081800` | `0x060` | 4 × `u16` raw encoder ADC counts (channels IN4–IN7) | 8 |
 
-Raw 12-bit counts, not degrees, so the client owns the scaling: `degrees =
-count * 360 / 4096`.
+| Full ID      | API     | Contents                           | DLC |
+| ------------ | ------- | ---------------------------------- | --- |
+| `0x07081800` | `0x060` | 4 × `u16` raw ADC counts (IN4–IN7) | 8   |
 
-This is board-level rather than per-motor, and goes out on the base device number.
-Four channels in one frame costs a quarter of the bus time of four per-motor
-frames, and with only three hardware transmit mailboxes a four-frame burst at
-100 Hz would drop frames.
 
-Published every `CAN_TLM_INTERVAL_MS` (default 10 ms = 100 Hz) and additionally
-whenever an `ENCODER_REQ` arrives. Set `CAN_TLM_INTERVAL_MS` to `0` for
-request-only polling. At 100 Hz this costs roughly 1.6% of the bus and a
-negligible slice of CPU — publishing over CAN avoids the `vsnprintf`, queue copy,
-and potentially 50 ms blocking write that the same data would cost as a USB log
-line.
+Device type **7** (encoder), manufacturer 8, base device number. Raw 12-bit
+counts; the client owns scaling (`degrees = count * 360 / 4096`). Published at
+`encoder_poll_rate` Hz (default 1) and also whenever `ENCODER_REQ` arrives.
 
-### Receive filter
+### Examples (`cansend`)
 
-Three mask-mode filter banks feed FIFO0:
-
-| Match | Mask | Accepts |
-|-------|------|---------|
-| `0x02080000` | `0x1FFF0038` | Any API identifier for any of this board's eight motors |
-| `0x0208003F` | `0x1FFF003F` | Any API identifier sent to all motors |
-| `0x00000000` | `0x1FFFFC00` | The whole broadcast class |
-
-The first bank is the interesting one: masking bits 5:3 of the device number and
-leaving bits 2:0 free accepts an aligned block of exactly eight device numbers, so
-all eight motors cost one filter bank rather than eight. That is why
-`CAN_MOTOR_ID_BASE` has to be 8-aligned.
-
-The device masks also cover the `IDE` and `RTR` bits, so standard-identifier and
-remote frames are rejected in hardware. Everything else on the bus — other
-manufacturers, other boards' blocks, the roboRIO heartbeat — is dropped at zero
-CPU cost.
-
-Set `USE_CAN_COMMANDS` to `0` in `main.c` to leave the peripheral unstarted and
-the CAN tasks idle.
-
-### Examples
-
-Using `cansend` from can-utils on a Linux host:
-
-Using `cansend` from can-utils on a Linux host. Eight hex digits in the
-identifier is what selects an extended frame; three digits would send a standard
-frame that the board rejects.
+Eight hex digits in the identifier selects an extended frame.
 
 ```bash
-# Move motor 0 to step 51200 at speed 80
-#   51200 = 0x0000C800 -> bytes 00 C8 00 00 ;  80 -> 50 00 00 00
+# Motor 0 to step 51200 at speed 80
 cansend can0 02080C00#00C8000050000000
 
-# Move motor 3 to step -1000 at the default speed (speed field 0)
-#   -1000 = 0xFFFFFC18 -> bytes 18 FC FF FF
-cansend can0 02080C03#18FCFFFF00000000
-
-# Jog motor 0 forward at 60, motor 2 in reverse at 60 (-60 = 0xFFFFFFC4)
+# Jog motor 0 forward at 60; motor 2 reverse at 60
 cansend can0 02080400#000000003C000000
 cansend can0 02080402#00000000C4FFFFFF
 
-# Stop motor 0
+# Stop motor 0; stop all eight
 cansend can0 02080000#
-
-# Stop all eight motors in one frame
 cansend can0 0208003F#
 
-# Request one encoder frame
+# One encoder frame now
 cansend can0 02081440#
 
-# FRC Disable broadcast: every device on the bus stops immediately
+# FRC Disable
 cansend can0 00000000#
 ```
 
-A malformed frame (unknown API identifier, DLC other than 8 on a motion command,
-speed outside ±250, device number outside the block) is counted and logged to the
-USB console rather than acknowledged on the bus.
+A malformed frame is counted and logged to USB, not acknowledged on the bus.
+With no other node to ACK, `AutoRetransmission` is off, so TX fails immediately
+(`tx_drop` climbs). For a single-board bench test, temporarily set
+`hcan1.Init.Mode = CAN_MODE_SILENT_LOOPBACK` in `MX_CAN1_Init`.
 
-### Bench testing without a second node
+Set `USE_CAN_COMMANDS` to `0` in `main.c` to leave CAN unstarted.
 
-`AutoRetransmission` is disabled, so with no other node on the bus to ACK, every
-transmitted frame fails immediately and shows up as a climbing `tx_drop` and a
-nonzero `err` in the diagnostics. To exercise the code with only the board
-connected, temporarily set `hcan1.Init.Mode = CAN_MODE_SILENT_LOOPBACK` in
-`MX_CAN1_Init`.
+## Task hierarchy
 
-Automatic bus-off recovery (`ABOM`) is enabled in software before
-`HAL_CAN_Start`, so a wiring fault that takes the controller bus-off recovers on
-its own rather than silently killing the interface.
+Use this when adding work: pick a priority that preserves the producer /
+consumer order, register the task in CubeMX, and keep STEP generation and
+Disable handling in interrupts.
 
-## Telemetry / logging
+### Interrupts (always above every task)
 
-A low-priority logger task prints periodic lines (every `DIAG_INTERVAL_MS`,
-default 1 s) to the USB console:
 
-```text
-RX cb=412 bytes=1980 rx_drop=0 lines=96 invalid=0
-CMD qdrop=0 qpeak=1/16 notify_sent=96 recv=96 coalesced=0
-CAN rx=1204 qdrop=0 invalid=0 queued=1204 tx_drop=0 bcast=0 dis=0 err=0x00000000
-ADC: IN4=180.1 IN5=180.2 IN6=179.9 IN7=180.0
-Stack free words: motor0=180 logger=120 usb=540 out=210 can=88 tlm=70 heap=5120
-```
+| NVIC priority | IRQ        | Role                                                              |
+| ------------- | ---------- | ----------------------------------------------------------------- |
+| 5             | `TIM2`     | Step-pulse generator. Emits STEP independently of the scheduler.  |
+| 6             | `CAN1_RX0` | Copies frames into `canRxQueue`. Applies FRC Disable immediately. |
 
-- `RX` / `CMD` account for the USB command path: bytes the ISR could not buffer,
-  lines that matched no command, commands rejected by a full scheduler queue,
-  the deepest queue backlog seen, and notifications overwritten before a motor
-  task consumed them.
-- `CAN` is the same accounting for the CAN path. `bcast` counts FRC broadcast
-  messages seen and `dis` counts the Disable/System Halt broadcasts acted on, so a
-  climbing `dis` while you expect motion means something on the bus is holding the
-  board disabled. `err` is `HAL_CAN_GetError`; a nonzero value alongside a
-  climbing `tx_drop` usually means nothing is on the bus to ACK, not that commands
-  were bad.
-- `ADC:` shows the four encoder channels scaled to degrees.
-- `Stack free words:` is the minimum free stack ever seen per task (multiply by
-  4 for bytes). A value near `0` means that task is close to overflowing — bump
-  its stack size in the CubeMX task list. `heap` is the FreeRTOS pool left free
-  out of `configTOTAL_HEAP_SIZE`; `logQueue` alone accounts for 5 KB of the 32 KB.
 
-On boot, if the previous run crashed you'll also see a line such as:
+`CAN1_RX0` is enabled in `HAL_CAN_MspInit`, not the CubeMX NVIC tab, and the
+handler is hand-written in `stm32f4xx_it.c`. Do not enable it in CubeMX or you
+will get duplicate symbols.
+
+### FreeRTOS tasks (highest first)
+
+CMSIS-RTOS2 numeric priorities, configured in the CubeMX task list (and the
+matching `osThreadAttr_t` in `main.c`).
+
+
+| Prio | CMSIS                    | Task                   | Role                                                              |
+| ---- | ------------------------ | ---------------------- | ----------------------------------------------------------------- |
+| 32   | `osPriorityAboveNormal`  | **motorController** ×8 | Applies one motor's queued command to stepper state.              |
+| 24   | `osPriorityNormal`       | **commandSchedule**    | Reads the shared command queue; notifies the matching motor task. |
+| 18   | `osPriorityBelowNormal2` | **canCommand**         | Parses CAN frames into commands.                                  |
+| 17   | `osPriorityBelowNormal1` | **canTelemetry**       | Only task that transmits on CAN (encoder frames).                 |
+| 16   | `osPriorityBelowNormal`  | **usbCommand**         | Assembles USB lines and parses them.                              |
+| 15   | `osPriorityLow7`         | **outputWriter**       | Only task that writes USB; drains `logQueue`.                     |
+| 8    | `osPriorityLow`          | **logger**             | Periodic diagnostics.                                             |
+
 
 ```text
-*** PREVIOUS RESET CAUSE: STACK OVERFLOW (task: 'motorController') ***
+USB CDC --> usbCommand --+
+                         +--> scheduler queue --> commandSchedule --> motor task --> stepper state
+CAN RX  --> canCommand --+                                              ^
+                                                                        |
+TIM2 (prio 5) ---------------------------------------------- STEP pulses +
+CAN1_RX0 (prio 6) -- Disable in ISR; other frames --> canRxQueue
+
+canTelemetry --> CAN TX (encoders)
+logger --> logQueue --> outputWriter --> USB CDC IN
 ```
 
-## Firmware layout
+Rules that the current ranking encodes — keep them if you add a task:
 
-| Path | Purpose |
-|------|---------|
-| `Core/Src/main.c` | Application: motor structs, USB + CAN command parsing, FreeRTOS tasks, step ISR. |
-| `Core/Src/retarget_usb.c` | Routes `printf`/`_write` to USB CDC. |
-| `Core/Src/tmcSPI.c` | Bit-banged SPI configuration and diagnostics for the TMC5160 drivers. |
-| `USB_DEVICE/` | USB CDC device stack (ST middleware). |
-| `Middlewares/Third_Party/FreeRTOS/` | FreeRTOS kernel. |
-| `Drivers/` | STM32 HAL + CMSIS. |
-| `Debug/` | Build output and generated makefile. |
-| `monster8swerve.ioc` | STM32CubeMX project configuration. |
+1. **Consumer above producer** on every bounded queue, so the queue drains
+  inside the `put` that filled it and does not build a backlog.
+2. **Both CAN tasks above both USB tasks**, so a stuck USB host (a CDC write
+  can busy-wait 50 ms) cannot delay machine control.
+3. `canCommand` **above** `canTelemetry`, so an inbound command preempts an
+  outbound publish. Only `canTelemetry` calls `HAL_CAN_AddTxMessage`.
+4. **STEP stays in** `TIM2`, never in a task. Nothing at NVIC 5 or more urgent
+  may run long enough to stretch a pulse.
+5. **FRC Disable stays in** `CAN1_RX0`. It must not sit behind a full queue.
 
-### Tasks
 
-Listed highest priority first. The numbers are CMSIS-RTOS2 priorities and are
-configured in the CubeMX task list, not by hand in `main.c`.
 
-| Priority | Task | Role |
-|----|------------------|------|
-| 32 | **motorController** ×8 | Applies move/speed/stop/disable commands to one stepper's state. |
-| 24 | **commandSchedule** | Reads commands from the shared queue and notifies the right motor task. |
-| 18 | **canCommand** | Parses CAN frames into commands. |
-| 17 | **canTelemetry** | Publishes encoder frames; the only task that transmits on CAN. |
-| 16 | **usbCommand** | Receives USB bytes, assembles lines, parses them. |
-| 15 | **outputWriter** | Drains `logQueue` to stdout; the only task that writes to USB. |
-| 8  | **logger** | Periodic diagnostics. |
+### CubeMX regeneration
 
-The ordering is deliberate. Each stage of a command path runs **above** its
-producer, so a queue is drained inside the `put` that filled it and never builds
-a backlog. Both CAN tasks sit above both USB tasks, so a slow or absent USB host
-cannot delay the machine control path — relevant because a USB write busy-waits
-up to 50 ms when the endpoint is busy. `canCommand` sits above `canTelemetry` so
-an inbound command always preempts an outbound publish.
+All seven named tasks are in the CubeMX task list; application code lives in
+`/* USER CODE */` blocks. If you add a task, register it in CubeMX as well —
+a task created only in generated code disappears on the next regeneration.
 
-The actual STEP pulses are generated in the `TIM2` period-elapsed interrupt, not
-in a task. `CAN1_RX0` is at NVIC priority 6, one step below `TIM2`'s 5, so a CAN
-interrupt can never delay a step pulse.
-
-### A note on CubeMX regeneration
-
-All seven tasks are registered in the CubeMX task list, and everything else lives
-inside `/* USER CODE */` blocks. This matters: `outputWriter` was once created
-only in the generated section without a matching entry in the task list, and a
-regeneration silently deleted it — taking the only `logQueue` consumer with it and
-leaving a dangling reference that broke the build. If you add a task, register it
-in CubeMX.
-
-`CAN1_RX0` is *not* enabled in the CubeMX NVIC tab; it is enabled by hand in
-`HAL_CAN_MspInit`, and `CAN1_RX0_IRQHandler` is hand-written in
-`stm32f4xx_it.c`. If you ever enable it in CubeMX, delete both — CubeMX will
-generate them and the duplicates will not link.
-
-## Notes and limitations
-
-- Positions are full `int32` on both transports; each motor task has its own
-  depth-1 overwrite queue carrying the whole command, replacing the packed 32-bit
-  task notification that used to cap targets at `int16`.
-- Speed is limited to `MAX_SPEED` (250); `0` selects `DEFAULT_SPEED` (80). Over
-  CAN an out-of-range speed is rejected and logged; over USB it is clamped.
-- Command batches are not atomic on either transport.
-- There is no link-loss failsafe: if the CAN client stops sending, motors hold
-  their last commanded speed. Send an explicit `STOP`, or the FRC Disable
-  broadcast. The roboRIO heartbeat, which is how the FRC spec expects an actuator
-  device to notice the robot has gone away, is not implemented.
-- `STATUS` replies are printed to the USB console on both transports; there is no
-  status, ack, or firmware-version frame on the bus, so the board is invisible to
-  FRC device-enumeration tools.
+The eight motor tasks are spawned from a `USER CODE` loop using the
+`motorController` attributes. The CubeMX `motorController` create call is
+intentionally commented out so you do not get a ninth empty instance.
