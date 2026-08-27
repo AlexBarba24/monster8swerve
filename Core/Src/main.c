@@ -210,8 +210,7 @@ typedef struct {
 #define CAN_API_ENCODER_REQ  0x051u /* class 5 index 1. Payload ignored, board-level */
 #define CAN_API_TLM_ENCODERS 0x060u /* class 6 index 0. DLC 8: 4 x u16 ADC counts */
 #define CAN_API_POLL_ENCODER 0x061u /* class 6 index 1. Frequency to report encoder values. */
-/* Class 6 index 1 onward is reserved for per-motor status frames, which would
- * mirror the command payload: int32 position then int32 speed. */
+
 
 /* Broadcast messages carry device type 0, manufacturer 0 and API class 0, so the
  * message number is the API index and Disable is arbitration ID 0x00000000 -
@@ -234,7 +233,7 @@ typedef struct {
  * number - motor 0's address - because a board-level frame still needs a device
  * number and that is the one that identifies this board's block. */
 #define CAN_TX_ID_ENCODERS \
-    FRC_MAKE_ID(CAN_DEVICE_TYPE, CAN_MANUFACTURER, CAN_API_TLM_ENCODERS, CAN_MOTOR_ID_BASE)
+    FRC_MAKE_ID(FRC_DEVICE_TYPE_ENCODER, CAN_MANUFACTURER, CAN_API_TLM_ENCODERS, CAN_MOTOR_ID_BASE)
 
 /* Receive filters, as {id, mask} pairs over the 29-bit identifier. A 1 in the
  * mask means the bit must match.
@@ -409,7 +408,7 @@ volatile uint32_t cmd_invalid_count = 0;
 volatile uint32_t cmd_queue_drop_count = 0;
 volatile uint32_t cmd_queue_peak = 0;
 
-volatile uint32_t encoder_poll_rate = 0;
+volatile uint32_t encoder_poll_rate = 1;
 volatile uint32_t encoder_poll_acc = 0;
 
 /* CAN command-path accounting, mirroring the USB counters above so a lost
@@ -1241,6 +1240,7 @@ static bool CanCommandForApi(uint32_t api, CommandType *type, bool *needs_payloa
  */
 static void CanPublishEncoders(void)
 {
+	LogDeferred("Publishing Encoder Values\r\n");
     CAN_TxHeaderTypeDef header = {
         .StdId = 0,
         .ExtId = CAN_TX_ID_ENCODERS,
@@ -1323,6 +1323,10 @@ static void HandleCanFrame(const CanFrame *frame)
     uint32_t device = FRC_DEVICE_NUMBER(frame->id);
 
     /* Board-level identifiers, which are not addressed to a motor. */
+    if (api == CAN_API_POLL_ENCODER) {
+    	encoder_poll_rate = CanReadInt32(&frame->data[0]);
+    	return;
+    }
     if (api == CAN_API_ENCODER_REQ)
     {
         /* Delegated to canTelemetry rather than transmitted here so that every
