@@ -5,10 +5,12 @@ four steer) for a swerve chassis. It runs on FreeRTOS. Commands arrive over USB
 CDC (text, for bench work) or CAN1 at 1 Mbit/s (FRC addressing, for the
 roboRIO). Both feeds share one motion scheduler.
 
+The vendor library for this project can be found at [repository](https://github.com/AlexBarba24/MonsterControllerVendorlib), with the library JSON file at [https://alexbarba24.github.io/MonsterControllerVendorlib/MonsterControllerVendor.json](https://alexbarba24.github.io/MonsterControllerVendorlib/MonsterControllerVendor.json).
+
 ## Contents
 
 - [Usage](#usage)
-- [Wiring](#wiring)
+- [Wiring](#firmware-pin-map)
 - [Flashing with STM32CubeProgrammer (USB)](#flashing-with-stm32cubeprogrammer-usb)
 - [Serial console](#serial-console)
 - [CAN protocol](#can-protocol)
